@@ -1,9 +1,8 @@
 // src/pages/customer/WorkerPublicProfile.tsx
-// BUG FIX (Bugs #1 + #3):
-//   Reads full form data from location.state instead of jobId.
-//   handleBook() calls useBookJob with all form fields → INSERT job with
-//   worker_id + status='pending'.
-// ALL JSX, Tailwind classes, UI elements — IDENTICAL to original.
+// POLISH:
+//   [POLISH 3] Removed Portfolio section entirely
+//   [POLISH 1] Passes budget + photoUrls from form state to useBookJob
+// ALL other JSX, Tailwind classes, UI elements — IDENTICAL to original.
 
 import { useState } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
@@ -15,15 +14,18 @@ import { toast } from "@/hooks/use-toast";
 
 const DAY_LABELS = ["Today", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-// Shape of form data forwarded from BookService → WorkerSelection → here
 interface BookFormState {
-  category?: string;
-  description?: string;
-  address?: string;
-  date?: string;
-  timeSlot?: string;
-  urgency?: "normal" | "urgent";
+  category?:      string;
+  description?:   string;
+  address?:       string;
+  latitude?:      number | null;
+  longitude?:     number | null;
+  date?:          string;
+  timeSlot?:      string;
+  urgency?:       "normal" | "urgent";
   selectedTools?: string[];
+  budget?:        number | null;    // [POLISH 1]
+  photoUrls?:     string[];         // [POLISH 1]
 }
 
 export default function WorkerPublicProfile() {
@@ -31,32 +33,33 @@ export default function WorkerPublicProfile() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // [FIX] Read full form data forwarded from WorkerSelection (not a jobId)
-  const formState = (location.state as BookFormState | null) ?? {};
+  const formState     = (location.state as BookFormState | null) ?? {};
   const hasJobContext = !!formState.category;
 
   const { data: worker, isLoading } = useWorkerPublicProfile(id || "");
   const bookJob = useBookJob();
   const [showReport, setShowReport] = useState(false);
 
-  // [FIX] INSERT job with worker_id + status='pending' on "Book This Worker"
   const handleBook = async () => {
     if (!hasJobContext) {
-      // Arrived from dashboard recent workers — no form context
       navigate("/customer/book");
       return;
     }
     if (!worker) return;
 
     await bookJob.mutateAsync({
-      workerId:       worker.id,
-      categorySlug:   formState.category   ?? "",
-      description:    formState.description ?? "",
-      address:        formState.address     ?? "",
-      date:           formState.date        ?? "",
-      timeSlot:       formState.timeSlot    ?? "",
-      urgency:        formState.urgency     ?? "normal",
-      requiredTools:  formState.selectedTools ?? [],
+      workerId:      worker.id,
+      categorySlug:  formState.category    ?? "",
+      description:   formState.description ?? "",
+      address:       formState.address     ?? "",
+      latitude:      formState.latitude    ?? null,
+      longitude:     formState.longitude   ?? null,
+      date:          formState.date        ?? "",
+      timeSlot:      formState.timeSlot    ?? "",
+      urgency:       formState.urgency     ?? "normal",
+      requiredTools: formState.selectedTools ?? [],
+      budget:        formState.budget      ?? null,    // [POLISH 1]
+      photoUrls:     formState.photoUrls   ?? [],      // [POLISH 1]
     });
 
     toast({
@@ -84,7 +87,6 @@ export default function WorkerPublicProfile() {
     return <div className="px-4 py-10 text-center"><p className="text-muted-foreground">Worker not found</p></div>;
   }
 
-  // ── UI — IDENTICAL TO ORIGINAL ────────────────────────────────────────────
   return (
     <div className="px-4 py-5 space-y-5 animate-fade-in pb-28">
       {/* Hero */}
@@ -96,7 +98,10 @@ export default function WorkerPublicProfile() {
           <Flag className="h-4 w-4 text-muted-foreground" />
         </button>
         <div className="mx-auto h-24 w-24 rounded-full bg-muted flex items-center justify-center text-3xl font-bold text-muted-foreground mb-3">
-          {worker.name.charAt(0)}
+          {worker.photo
+            ? <img src={worker.photo} alt={worker.name} className="h-full w-full object-cover rounded-full" />
+            : worker.name.charAt(0)
+          }
         </div>
         <h2 className="text-xl font-bold text-foreground">{worker.name}</h2>
         <div className="flex items-center justify-center gap-2 mt-1">
@@ -137,17 +142,7 @@ export default function WorkerPublicProfile() {
         </div>
       </div>
 
-      {/* Portfolio */}
-      <div className="space-y-2">
-        <h3 className="text-sm font-bold text-foreground">Portfolio</h3>
-        <div className="grid grid-cols-2 gap-2">
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="aspect-square rounded-xl bg-muted border border-border flex items-center justify-center text-muted-foreground text-xs">
-              Photo {i}
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* [POLISH 3] Portfolio section REMOVED */}
 
       {/* Availability Calendar */}
       <div className="space-y-2">
@@ -176,10 +171,7 @@ export default function WorkerPublicProfile() {
                 <span className="text-sm font-semibold text-foreground">{review.customerName}</span>
                 <div className="flex items-center gap-0.5">
                   {Array.from({ length: 5 }, (_, i) => (
-                    <Star
-                      key={i}
-                      className={`h-3 w-3 ${i < review.rating ? "fill-yellow-500 text-yellow-500" : "text-muted-foreground/30"}`}
-                    />
+                    <Star key={i} className={`h-3 w-3 ${i < review.rating ? "fill-yellow-500 text-yellow-500" : "text-muted-foreground/30"}`} />
                   ))}
                 </div>
               </div>
@@ -190,7 +182,7 @@ export default function WorkerPublicProfile() {
         )}
       </div>
 
-      {/* Sticky Bottom — [FIX] label based on whether form context exists */}
+      {/* Sticky Bottom */}
       <div className="fixed bottom-16 left-1/2 -translate-x-1/2 w-full max-w-[430px] bg-card border-t border-border px-4 py-3 z-20">
         <LoadingButton loading={bookJob.isPending} onClick={handleBook}>
           {hasJobContext ? "Book This Worker" : "Book a Service First"}

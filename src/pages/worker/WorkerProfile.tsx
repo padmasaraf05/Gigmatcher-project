@@ -1,14 +1,15 @@
 // src/pages/worker/WorkerProfile.tsx
-// PHASE 3 CHANGE: handleSave() replaced with real Supabase writes.
-// fetchProfile() was already real — unchanged.
-// ALL JSX, Tailwind classes, state, UI — IDENTICAL to original.
+// POLISH [ISSUE 2]:
+//   Camera button now opens a real file picker → uploads to Supabase
+//   "profile-photos" storage bucket → saves public URL in profiles.avatar_url
+// ALL JSX, Tailwind classes, state, other handlers — IDENTICAL to original.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import LoadingButton from "@/components/LoadingButton";
-import { Camera, X, Plus, MapPin } from "lucide-react";
+import { Camera, X, Plus, MapPin, Loader2 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabase";
 
@@ -16,20 +17,76 @@ const LANGUAGE_OPTIONS = ["English", "Hindi", "Tamil", "Telugu", "Marathi", "Kan
 
 export default function WorkerProfile() {
   const { user } = useAuth();
-  const [name, setName] = useState(user?.name || "");
+  const [name, setName]           = useState(user?.name || "");
   const [languages, setLanguages] = useState<string[]>([]);
-  const [skills, setSkills] = useState<string[]>([]);
-  const [tools, setTools] = useState<string[]>([]);
-  const [radius, setRadius] = useState([5]);
-  const [saving, setSaving] = useState(false);
-  const [newSkill, setNewSkill] = useState("");
-  const [newTool, setNewTool] = useState("");
+  const [skills, setSkills]       = useState<string[]>([]);
+  const [tools, setTools]         = useState<string[]>([]);
+  const [radius, setRadius]       = useState([5]);
+  const [saving, setSaving]       = useState(false);
+  const [newSkill, setNewSkill]   = useState("");
+  const [newTool, setNewTool]     = useState("");
+
+  // [POLISH 2] Profile photo state
+  const [avatarUrl, setAvatarUrl]       = useState<string | null>(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   const toggleLang = (lang: string) => {
     setLanguages((p) => (p.includes(lang) ? p.filter((l) => l !== lang) : [...p, lang]));
   };
 
-  // ── handleSave — PHASE 3: real Supabase writes ────────────────────────────
+  // [POLISH 2] Upload profile photo → Supabase storage → save URL in profiles
+  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingPhoto(true);
+
+    const { data: authData } = await supabase.auth.getUser();
+    if (!authData?.user) { setUploadingPhoto(false); return; }
+
+    const userId = authData.user.id;
+    const ext    = file.name.split(".").pop() ?? "jpg";
+    const path   = `workers/${userId}/avatar.${ext}`;
+
+    // Upload (upsert — overwrite previous photo)
+    const { error: uploadErr } = await supabase.storage
+      .from("profile-photos")
+      .upload(path, file, { upsert: true });
+
+    if (uploadErr) {
+      setUploadingPhoto(false);
+      toast({ title: "Upload failed", description: uploadErr.message });
+      return;
+    }
+
+    // Get public URL
+    const { data: urlData } = supabase.storage
+      .from("profile-photos")
+      .getPublicUrl(path);
+
+    const publicUrl = urlData.publicUrl;
+
+    // Save to profiles.avatar_url
+    const { error: dbErr } = await supabase
+      .from("profiles")
+      .update({ avatar_url: publicUrl })
+      .eq("id", userId);
+
+    setUploadingPhoto(false);
+
+    if (dbErr) {
+      toast({ title: "Could not save photo", description: dbErr.message });
+      return;
+    }
+
+    setAvatarUrl(publicUrl);
+    // Reset so same file can be re-selected
+    if (photoInputRef.current) photoInputRef.current.value = "";
+    toast({ title: "Profile photo updated ✓" });
+  };
+
+  // ── handleSave — real Supabase writes ─────────────────────────────────────
   const handleSave = async () => {
     setSaving(true);
 
@@ -65,7 +122,7 @@ export default function WorkerProfile() {
       return;
     }
 
-    // 3. Replace skills — look up category UUIDs by name, then delete + insert
+    // 3. Replace skills
     const { data: categories, error: catErr } = await supabase
       .from("service_categories")
       .select("id, name");
@@ -80,19 +137,16 @@ export default function WorkerProfile() {
       categories.map((c: { id: string; name: string }) => [c.name, c.id])
     );
 
-    // Skills the user typed that match known categories
     const knownSkills = skills.filter((s) => categoryMap.has(s));
-    // Custom skills without a DB category are dropped silently —
-    // they were display-only additions via the free-text input.
 
     await supabase.from("worker_skills").delete().eq("worker_id", userId);
 
     if (knownSkills.length > 0) {
       const { error: skillsErr } = await supabase.from("worker_skills").insert(
         knownSkills.map((s) => ({
-          worker_id: userId,
-          category_id: categoryMap.get(s)!,
-          experience_level: "Intermediate", // profile page has no level picker — use default
+          worker_id:        userId,
+          category_id:      categoryMap.get(s)!,
+          experience_level: "Intermediate",
         }))
       );
       if (skillsErr) {
@@ -102,7 +156,7 @@ export default function WorkerProfile() {
       }
     }
 
-    // 4. Replace tools — simple string list, no UUID mapping needed
+    // 4. Replace tools
     await supabase.from("worker_tools").delete().eq("worker_id", userId);
 
     if (tools.length > 0) {
@@ -119,7 +173,6 @@ export default function WorkerProfile() {
     setSaving(false);
     toast({ title: "Profile saved ✓", description: "Your changes have been updated" });
   };
-  // ── end handleSave ─────────────────────────────────────────────────────────
 
   useEffect(() => {
     const fetchProfile = async () => {
@@ -128,29 +181,24 @@ export default function WorkerProfile() {
 
       const userId = authData.user.id;
 
-      // Fetch common profile
       const { data: profile } = await supabase
         .from("profiles")
         .select("*")
         .eq("id", userId)
         .single();
 
-      if (profile?.full_name) {
-        setName(profile.full_name);
-      }
+      if (profile?.full_name) setName(profile.full_name);
+      // [POLISH 2] Load existing avatar
+      if (profile?.avatar_url) setAvatarUrl(profile.avatar_url);
 
-      // Fetch worker profile
       const { data: workerProfile } = await supabase
         .from("worker_profiles")
         .select("*")
         .eq("user_id", userId)
         .single();
 
-      if (workerProfile?.service_radius_km) {
-        setRadius([workerProfile.service_radius_km]);
-      }
+      if (workerProfile?.service_radius_km) setRadius([workerProfile.service_radius_km]);
 
-      // Fetch skills
       const { data: skillsData } = await supabase
         .from("worker_skills")
         .select("service_categories(name)")
@@ -158,11 +206,9 @@ export default function WorkerProfile() {
 
       if (skillsData) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const skillNames = skillsData.map((s: any) => s.service_categories?.name).filter(Boolean);
-        setSkills(skillNames);
+        setSkills(skillsData.map((s: any) => s.service_categories?.name).filter(Boolean));
       }
 
-      // Fetch tools
       const { data: toolsData } = await supabase
         .from("worker_tools")
         .select("tool_name")
@@ -182,11 +228,35 @@ export default function WorkerProfile() {
     <div className="px-4 py-5 space-y-6 animate-fade-in pb-24">
       <h2 className="text-xl font-bold text-foreground">Profile</h2>
 
-      {/* Photo */}
+      {/* [POLISH 2] Photo — now opens real file picker */}
       <div className="flex justify-center">
-        <button className="relative h-24 w-24 rounded-full border-2 border-dashed border-primary bg-muted flex items-center justify-center overflow-hidden">
-          <Camera className="h-7 w-7 text-primary" />
+        <button
+          onClick={() => photoInputRef.current?.click()}
+          className="relative h-24 w-24 rounded-full border-2 border-dashed border-primary bg-muted flex items-center justify-center overflow-hidden"
+          disabled={uploadingPhoto}
+        >
+          {uploadingPhoto ? (
+            <Loader2 className="h-7 w-7 text-primary animate-spin" />
+          ) : avatarUrl ? (
+            <>
+              <img src={avatarUrl} alt="Profile" className="h-full w-full object-cover" />
+              {/* Camera overlay on hover */}
+              <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
+                <Camera className="h-6 w-6 text-white" />
+              </div>
+            </>
+          ) : (
+            <Camera className="h-7 w-7 text-primary" />
+          )}
         </button>
+        {/* Hidden file input */}
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept="image/*"
+          className="hidden"
+          onChange={handlePhotoChange}
+        />
       </div>
 
       {/* Name */}

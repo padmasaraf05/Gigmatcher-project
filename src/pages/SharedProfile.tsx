@@ -1,18 +1,19 @@
 // src/pages/SharedProfile.tsx
-// PHASE 4 CHANGES (marked [P4]):
-//   1. handleSave() — real Supabase UPDATE profiles SET full_name
-//   2. name initial state — removed hardcoded "Rajesh Kumar" fallback
-//   3. useEffect — syncs name from DB on mount (catches stale AuthContext cache)
-// ALL JSX, Tailwind classes, layout, UI elements — IDENTICAL to original.
+// POLISH-2 FIX [CUSTOMER PROFILE PHOTO]:
+//   handlePhotoUpload now wires a real hidden file input → uploads to
+//   profile-photos Supabase Storage bucket at path customers/{uid}/avatar.{ext}
+//   → saves public URL to profiles.avatar_url → shows avatar preview.
+//   Added: photoInputRef, handlePhotoChange(), spinner during upload.
+// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { Input } from "@/components/ui/input";
 import { ConfirmDialog } from "@/components/shared";
 import LoadingButton from "@/components/LoadingButton";
-import { ArrowLeft, Camera, LogOut, Shield, Settings } from "lucide-react";
+import { ArrowLeft, Camera, LogOut, Shield, Settings, Loader2 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 
 const LANGUAGE_OPTIONS = ["English", "Hindi", "Tamil", "Telugu", "Marathi", "Kannada", "Bengali"];
@@ -21,33 +22,36 @@ export default function SharedProfile() {
   const { user, role, logout, refreshUser } = useAuth();
   const navigate = useNavigate();
 
-  // [P4] Removed hardcoded "Rajesh Kumar" fallback — use real name or empty string
-  const [name, setName] = useState(user?.name || "");
-  const [languages, setLanguages] = useState<string[]>(["English", "Hindi"]);
-  const [saving, setSaving] = useState(false);
-  const [showLogout, setShowLogout] = useState(false);
+  const [name, setName]                 = useState(user?.name || "");
+  const [languages, setLanguages]       = useState<string[]>(["English", "Hindi"]);
+  const [saving, setSaving]             = useState(false);
+  const [showLogout, setShowLogout]     = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  // [POLISH-2 FIX] uploading state + hidden file input ref
+  const [uploading, setUploading]       = useState(false);
+  const photoInputRef                   = useRef<HTMLInputElement>(null);
 
-  // [P4] Sync name from DB on mount in case AuthContext cache is stale
+  // Sync name from DB on mount (AuthContext cache may be stale)
   useEffect(() => {
-    const fetchName = async () => {
+    const fetchProfile = async () => {
       const { data: authData } = await supabase.auth.getUser();
       if (!authData?.user) return;
       const { data: profile } = await supabase
         .from("profiles")
-        .select("full_name")
+        .select("full_name, avatar_url")
         .eq("id", authData.user.id)
         .single();
       if (profile?.full_name) setName(profile.full_name);
+      // [POLISH-2 FIX] load existing avatar if present
+      if (profile?.avatar_url) setPhotoPreview(profile.avatar_url);
     };
-    fetchName();
+    fetchProfile();
   }, []);
 
   const toggleLang = (lang: string) => {
     setLanguages((p) => (p.includes(lang) ? p.filter((l) => l !== lang) : [...p, lang]));
   };
 
-  // [P4] handleSave — real Supabase write replacing mock setTimeout
   const handleSave = async () => {
     setSaving(true);
 
@@ -69,9 +73,7 @@ export default function SharedProfile() {
       return;
     }
 
-    // Refresh AuthContext so user?.name is up to date everywhere
     await refreshUser();
-
     setSaving(false);
     toast({ title: "Profile updated ✓" });
   };
@@ -82,10 +84,78 @@ export default function SharedProfile() {
     navigate("/login", { replace: true });
   };
 
-  const handlePhotoUpload = () => {
-    // Mock — photo upload to Supabase Storage deferred
-    setPhotoPreview("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' fill='%232563EB'%3E%3Crect width='96' height='96' rx='48' fill='%23e2e8f0'/%3E%3C/svg%3E");
-    toast({ title: "Photo uploaded", description: "Preview updated." });
+  // [POLISH-2 FIX] Trigger hidden file input
+  const handlePhotoClick = () => {
+    if (!uploading) photoInputRef.current?.click();
+  };
+
+  // [POLISH-2 FIX] Upload file to Supabase Storage → save URL to profiles.avatar_url
+  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type and size
+    if (!file.type.startsWith("image/")) {
+      toast({ title: "Please select an image file" });
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast({ title: "Image too large", description: "Please select an image under 5MB" });
+      return;
+    }
+
+    setUploading(true);
+
+    try {
+      const { data: authData } = await supabase.auth.getUser();
+      const uid = authData?.user?.id;
+      if (!uid) throw new Error("Not authenticated");
+
+      // Show local preview immediately
+      const previewUrl = URL.createObjectURL(file);
+      setPhotoPreview(previewUrl);
+
+      const ext = file.name.split(".").pop()?.toLowerCase() ?? "jpg";
+      const storagePath = `customers/${uid}/avatar.${ext}`;
+
+      // Upload to profile-photos bucket (same bucket as worker, different path prefix)
+      const { error: uploadError } = await supabase.storage
+        .from("profile-photos")
+        .upload(storagePath, file, { upsert: true, contentType: file.type });
+
+      if (uploadError) throw new Error(uploadError.message);
+
+      // Get public URL
+      const { data: urlData } = supabase.storage
+        .from("profile-photos")
+        .getPublicUrl(storagePath);
+
+      const publicUrl = urlData.publicUrl;
+
+      // Save to profiles table — avatar_url column
+      const { error: dbError } = await supabase
+        .from("profiles")
+        .update({ avatar_url: publicUrl })
+        .eq("id", uid);
+
+      if (dbError) throw new Error(dbError.message);
+
+      // Replace object URL with real URL
+      setPhotoPreview(publicUrl);
+      await refreshUser();
+      toast({ title: "Photo updated ✓" });
+    } catch (err) {
+      toast({
+        title: "Upload failed",
+        description: err instanceof Error ? err.message : "Please try again",
+      });
+      // Revert preview on failure
+      setPhotoPreview(null);
+    } finally {
+      setUploading(false);
+      // Clear input so same file can be re-selected
+      if (photoInputRef.current) photoInputRef.current.value = "";
+    }
   };
 
   // ── UI — IDENTICAL TO ORIGINAL ────────────────────────────────────────────
@@ -101,14 +171,30 @@ export default function SharedProfile() {
       <div className="px-4 py-5 space-y-6 pb-24">
         {/* Photo */}
         <div className="flex justify-center">
-          <button onClick={handlePhotoUpload} className="relative h-24 w-24 rounded-full border-2 border-dashed border-primary bg-muted flex items-center justify-center overflow-hidden">
+          {/* [POLISH-2 FIX] hidden file input */}
+          <input
+            ref={photoInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handlePhotoChange}
+          />
+          <button
+            onClick={handlePhotoClick}
+            className="relative h-24 w-24 rounded-full border-2 border-dashed border-primary bg-muted flex items-center justify-center overflow-hidden"
+          >
             {photoPreview ? (
               <img src={photoPreview} alt="Profile" className="h-full w-full object-cover" />
             ) : (
               <Camera className="h-7 w-7 text-primary" />
             )}
+            {/* [POLISH-2 FIX] spinner overlay during upload, camera badge otherwise */}
             <div className="absolute bottom-0 right-0 h-7 w-7 rounded-full bg-primary flex items-center justify-center border-2 border-card">
-              <Camera className="h-3.5 w-3.5 text-primary-foreground" />
+              {uploading ? (
+                <Loader2 className="h-3.5 w-3.5 text-primary-foreground animate-spin" />
+              ) : (
+                <Camera className="h-3.5 w-3.5 text-primary-foreground" />
+              )}
             </div>
           </button>
         </div>

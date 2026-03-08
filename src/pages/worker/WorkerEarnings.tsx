@@ -1,10 +1,18 @@
+// src/pages/worker/WorkerEarnings.tsx
+// POLISH-2 FIX [PDF DOWNLOAD]:
+//   handleDownload now generates a real PDF using the browser's print-to-PDF
+//   mechanism via a hidden printable div. Opens in a new window styled for
+//   A4 printing so the browser "Save as PDF" dialog produces a clean report.
+//   No new dependencies required — uses only the existing window.print() API
+//   in an isolated popup window so the main app UI is never altered.
+// ALL other JSX structure, Tailwind classes, data display — IDENTICAL to original.
+
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useEnhancedEarnings } from "@/hooks/usePaymentApi";
 import { Skeleton } from "@/components/ui/skeleton";
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, Line, ComposedChart } from "recharts";
 import { Download, TrendingUp, TrendingDown } from "lucide-react";
-import { toast } from "@/hooks/use-toast";
 import LoadingButton from "@/components/LoadingButton";
 import ProSubscriptionCard from "@/components/ProSubscriptionCard";
 
@@ -12,29 +20,131 @@ const PERIODS = ["today", "week", "month", "custom"] as const;
 type Period = (typeof PERIODS)[number];
 
 const PERIOD_LABELS: Record<Period, string> = {
-  today: "Today",
-  week: "This Week",
-  month: "This Month",
+  today:  "Today",
+  week:   "This Week",
+  month:  "This Month",
   custom: "Custom",
 };
 
 export default function WorkerEarnings() {
-  const [period, setPeriod] = useState<Period>("week");
+  const [period, setPeriod]       = useState<Period>("week");
   const [downloading, setDownloading] = useState(false);
-  const navigate = useNavigate();
-  const { data, isLoading } = useEnhancedEarnings(period);
+  const navigate                  = useNavigate();
+  const { data, isLoading }       = useEnhancedEarnings(period);
 
   const statusChip = (s: string) => {
-    if (s === "paid") return "bg-accent/10 text-accent";
+    if (s === "paid")       return "bg-accent/10 text-accent";
     if (s === "processing") return "bg-primary/10 text-primary";
     return "bg-secondary/10 text-secondary";
   };
 
+  // [POLISH-2 FIX] Real PDF download — opens a print-ready window
   const handleDownload = async () => {
+    if (!data) return;
     setDownloading(true);
-    await new Promise((r) => setTimeout(r, 1500));
-    setDownloading(false);
-    toast({ title: "Report ready! 📄", description: "PDF report saved to your device" });
+
+    try {
+      // Build HTML content for the report
+      const periodLabel = PERIOD_LABELS[period];
+      const txRows = (data.transactions ?? [])
+        .map(
+          (tx) =>
+            `<tr>
+              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;">${tx.serviceIcon} ${tx.serviceType}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;">${tx.customerName}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;">${tx.date}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:right;">₹${tx.grossAmount}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:600;">₹${tx.netAmount}</td>
+              <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0;text-align:center;">
+                <span style="background:${tx.status === "paid" ? "#d1fae5" : "#fef9c3"};color:${tx.status === "paid" ? "#065f46" : "#713f12"};padding:2px 8px;border-radius:999px;font-size:11px;">${tx.status}</span>
+              </td>
+            </tr>`
+        )
+        .join("");
+
+      const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>GigMatcher Earnings Report</title>
+  <style>
+    @page { size: A4 portrait; margin: 16mm; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #1e293b; font-size: 13px; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .badge { display:inline-block; background:#eff6ff; color:#1d4ed8; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:600; margin-bottom:16px; }
+    .summary-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:12px; margin-bottom:20px; }
+    .card { border:1px solid #e2e8f0; border-radius:8px; padding:14px 16px; }
+    .card p { margin:0; font-size:12px; color:#64748b; }
+    .card .value { font-size:22px; font-weight:700; margin-top:4px; }
+    .card .value.green { color:#059669; }
+    .card .value.red   { color:#dc2626; }
+    table { width:100%; border-collapse:collapse; margin-top:8px; }
+    th { background:#f8fafc; padding:8px; text-align:left; font-size:11px; text-transform:uppercase; color:#94a3b8; letter-spacing:.05em; }
+    .footer { margin-top:24px; text-align:center; font-size:11px; color:#94a3b8; border-top:1px solid #e2e8f0; padding-top:12px; }
+  </style>
+</head>
+<body>
+  <h1>💼 GigMatcher</h1>
+  <div class="badge">Earnings Report — ${periodLabel}</div>
+  <div class="summary-grid">
+    <div class="card">
+      <p>Gross Earnings</p>
+      <div class="value">₹${data.grossEarnings.toLocaleString()}</div>
+    </div>
+    <div class="card">
+      <p>Net Payout (after 10% commission)</p>
+      <div class="value green">₹${data.netPayout.toLocaleString()}</div>
+    </div>
+    <div class="card">
+      <p>Platform Commission</p>
+      <div class="value red">-₹${data.commission.toLocaleString()}</div>
+    </div>
+    <div class="card">
+      <p>Jobs Completed</p>
+      <div class="value">${data.jobsCompleted}</div>
+    </div>
+  </div>
+
+  <h2 style="font-size:15px;margin:0 0 8px;">Transactions</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Service</th>
+        <th>Customer</th>
+        <th>Date</th>
+        <th style="text-align:right;">Gross</th>
+        <th style="text-align:right;">Net</th>
+        <th style="text-align:center;">Status</th>
+      </tr>
+    </thead>
+    <tbody>${txRows || '<tr><td colspan="6" style="padding:16px;text-align:center;color:#94a3b8;">No transactions for this period</td></tr>'}</tbody>
+  </table>
+
+  <div class="footer">
+    Generated by GigMatcher • ${new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}
+  </div>
+  <script>window.onload = function() { window.print(); window.onafterprint = function() { window.close(); }; }</script>
+</body>
+</html>`;
+
+      // Open in popup so print dialog doesn't affect main app
+      const popup = window.open("", "_blank", "width=800,height=600");
+      if (popup) {
+        popup.document.write(html);
+        popup.document.close();
+      } else {
+        // Fallback: create a Blob and download as HTML (user can open + print)
+        const blob = new Blob([html], { type: "text/html" });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement("a");
+        a.href     = url;
+        a.download = `gigmatcher-earnings-${period}-${Date.now()}.html`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+    } finally {
+      setDownloading(false);
+    }
   };
 
   if (isLoading) {
@@ -155,7 +265,7 @@ export default function WorkerEarnings() {
         </div>
       </div>
 
-      {/* Download */}
+      {/* [POLISH-2 FIX] Download — now generates a real printable PDF report */}
       <LoadingButton loading={downloading} onClick={handleDownload} variant="outline" className="w-full">
         <Download className="h-4 w-4 mr-2" /> Download PDF Report
       </LoadingButton>

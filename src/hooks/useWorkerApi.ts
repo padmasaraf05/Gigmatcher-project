@@ -1,13 +1,9 @@
 // src/hooks/useWorkerApi.ts
-// BUG FIX:
-//   Bug #2 — JOB_SELECT FK hint changed from jobs_customer_id_fkey constraint
-//     name to column name hint (profiles!customer_id) for reliable join.
-//   Bug #3 — useWorkerJobs("pending") now queries jobs WHERE worker_id = uid
-//     AND status = 'pending' (direct assignment). Previously used RPC which
-//     returned ALL unassigned jobs — now only returns jobs explicitly assigned
-//     to this worker by a customer who clicked "Book Now".
-//   Bug #3 — useUpdateJobStatus maps "declined" → DB status "cancelled" so
-//     rejected jobs surface in the customer's Cancelled bookings tab.
+// POLISH-2 FIX [PHOTOS]:
+//   - Added photo_urls to JOB_SELECT so DB query fetches customer-uploaded photos
+//   - Added photoUrls: string[] to Job interface
+//   - mapJobRow now maps photo_urls → photoUrls
+//   All other logic IDENTICAL to previous version.
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
@@ -38,6 +34,7 @@ export interface Job {
   customerRating: number;
   toolsRequired: string[];
   postedAt: string;
+  photoUrls: string[];   // [POLISH-2 FIX] customer-uploaded job photos
 }
 
 export interface Transaction {
@@ -95,6 +92,7 @@ function mapJobRow(j: {
   estimated_price?: number | null;
   final_price?: number | null;
   required_tools?: string[] | null;
+  photo_urls?: string[] | null;        // [POLISH-2 FIX]
   created_at: string;
   worker_id?: string | null;
   profiles?: { full_name?: string | null; phone?: string | null; profile_photo_url?: string | null } | { full_name?: string | null; phone?: string | null; profile_photo_url?: string | null }[] | null;
@@ -104,29 +102,24 @@ function mapJobRow(j: {
   const cust = Array.isArray(j.profiles) ? j.profiles[0] : j.profiles;
   const cat  = Array.isArray(j.service_categories) ? j.service_categories[0] : j.service_categories;
 
-  // [PHASE 8] Find the review the worker submitted for this job.
-  // reviewer_id = worker_id means the worker rated the customer.
   const reviewsArr = Array.isArray(j.reviews) ? j.reviews : [];
   const workerReview = j.worker_id
     ? reviewsArr.find((r) => r.reviewer_id === j.worker_id)
     : undefined;
   const customerRating = workerReview?.rating ?? 0;
 
-  // Map DB status → Job["status"]
   let status: Job["status"] = "pending";
-  if (j.status === "accepted")    status = "active";
+  if (j.status === "accepted")         status = "active";
   else if (j.status === "en_route")    status = "en_route";
   else if (j.status === "in_progress") status = "in_progress";
   else if (j.status === "completed")   status = "completed";
 
-  // Map urgency
   let urgency: Job["urgency"] = "normal";
-  if (j.urgency === "urgent")    urgency = "urgent";
-  else if (j.urgency === "scheduled") urgency = "scheduled";
+  if (j.urgency === "urgent")          urgency = "urgent";
+  else if (j.urgency === "scheduled")  urgency = "scheduled";
 
   return {
     id: j.id,
-    // [FIX Bug #2] full_name now reliably populated via profiles!customer_id join
     customerName:  (cust as { full_name?: string | null } | null)?.full_name ?? "Customer",
     customerPhoto: (cust as { profile_photo_url?: string | null } | null)?.profile_photo_url ?? "",
     serviceType:   (cat  as { name?: string | null } | null)?.name ?? "Service",
@@ -137,19 +130,19 @@ function mapJobRow(j: {
     description: j.description ?? "",
     address:     j.address     ?? "",
     phone:       (cust as { phone?: string | null } | null)?.phone ?? "",
-    customerRating: customerRating,
-    toolsRequired:  (j.required_tools as string[] | null) ?? [],
-    postedAt:       relativeTime(j.created_at),
+    customerRating,
+    toolsRequired: (j.required_tools as string[] | null) ?? [],
+    postedAt:      relativeTime(j.created_at),
+    // [POLISH-2 FIX] map photo_urls from DB column → photoUrls on Job type
+    photoUrls:     (j.photo_urls as string[] | null) ?? [],
   };
 }
 
-// [FIX Bug #2] Column-name FK hint (profiles!customer_id) is unambiguous even
-// when jobs has two FK columns pointing at profiles (customer_id + worker_id).
-// [PHASE 8] Added worker_id + reviews so customerRating is populated from
-// the review the worker submitted for this specific job.
+// [POLISH-2 FIX] Added photo_urls to select — this is the only line that changed
+// from the original JOB_SELECT constant.
 const JOB_SELECT = `
   id, description, status, urgency, address,
-  estimated_price, final_price, required_tools, created_at,
+  estimated_price, final_price, required_tools, photo_urls, created_at,
   worker_id,
   profiles!customer_id(full_name, phone, profile_photo_url),
   service_categories(name),
@@ -219,20 +212,6 @@ export function useWorkerDashboard() {
 
       const activeJobs: Job[] = (jobRows ?? []).map(mapJobRow);
 
-      // PHASE 14 PATCH for useWorkerApi.ts
-// 
-// In useWorkerDashboard() queryFn, find this block:
-//
-//   const { data: preds } = await supabase
-//     .from("demand_predictions")
-//     ...
-//   let demandAlert = "";
-//   if (preds && preds.length > 0) { ... }
-//
-// Replace it entirely with this:
-
-      // PHASE 14: FastAPI /demand-summary → richer alert with demand score + job count.
-      // Falls back to direct Supabase query if VITE_MATCHING_API_URL not set.
       let demandAlert = "";
       const matchingApiUrl = (import.meta.env.VITE_MATCHING_API_URL as string | undefined)
         ?.replace(/\/$/, "");
@@ -249,7 +228,6 @@ export function useWorkerDashboard() {
         }
       }
 
-      // Supabase fallback (or if FastAPI returns empty alert)
       if (!demandAlert) {
         const { data: preds } = await supabase
           .from("demand_predictions")
@@ -530,11 +508,6 @@ export function useWorkerJobs(filter: "pending" | "active" | "completed") {
       if (!uid) throw new Error("Not authenticated");
 
       if (filter === "pending") {
-        // [FIX Bug #1 + #3] Direct query: jobs explicitly assigned to THIS worker
-        // by the customer (worker_id = uid) but not yet accepted (status = 'pending').
-        // Replaces the old RPC get_pending_jobs_for_worker which returned ALL
-        // unassigned jobs matching the worker's skills — causing jobs to appear
-        // before the customer had chosen a specific worker.
         const { data, error } = await supabase
           .from("jobs")
           .select(JOB_SELECT)
@@ -557,7 +530,6 @@ export function useWorkerJobs(filter: "pending" | "active" | "completed") {
         return (data ?? []).map(mapJobRow);
       }
 
-      // completed
       const { data, error } = await supabase
         .from("jobs")
         .select(JOB_SELECT)
@@ -597,8 +569,6 @@ export function useUpdateJobStatus() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async ({ id, status }: { id: string; status: Job["status"] | "declined" }) => {
-      // [FIX Bug #3] Map Job["status"] → DB status string
-      // "declined" → "cancelled" so customer sees it in their Cancelled tab
       const dbStatus =
         status === "active"   ? "accepted"  :
         status === "declined" ? "cancelled" :
@@ -613,7 +583,7 @@ export function useUpdateJobStatus() {
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["worker"] });
-      void qc.invalidateQueries({ queryKey: ["customer"] }); // customer bookings also update
+      void qc.invalidateQueries({ queryKey: ["customer"] });
     },
     onError: (err: Error) => {
       toast({ title: "Could not update job status", description: err.message });
@@ -621,7 +591,7 @@ export function useUpdateJobStatus() {
   });
 }
 
-// ─── Mock: Earnings (Phase 7) ─────────────────────────────────────────────────
+// ─── Mock: Earnings (real impl lives in usePaymentApi.ts) ────────────────────
 
 export function useEarnings(period: "today" | "week" | "month") {
   return useQuery<EarningsData>({
@@ -658,9 +628,6 @@ export const TOOLS_BY_SKILL: Record<string, string[]> = {
 };
 
 // ─── Real: Worker submits review of customer ──────────────────────────────────
-// PHASE 8: Called from JobRatingScreen when role === "worker".
-// Inserts a review where reviewer = worker, reviewee = customer.
-// Does NOT update worker_profiles rating (that's for customer→worker reviews).
 
 export function useSubmitWorkerReview() {
   const qc = useQueryClient();
@@ -678,7 +645,6 @@ export function useSubmitWorkerReview() {
       const uid = session?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Verify job exists and worker is assigned to it
       const { data: job, error: jobErr } = await supabase
         .from("jobs")
         .select("customer_id, worker_id, status")
@@ -693,8 +659,8 @@ export function useSubmitWorkerReview() {
         .from("reviews")
         .insert({
           job_id:      jobId,
-          reviewer_id: uid,              // worker reviewing
-          reviewee_id: job.customer_id,  // customer being reviewed
+          reviewer_id: uid,
+          reviewee_id: job.customer_id,
           rating,
           comment: comment?.trim() || null,
         });

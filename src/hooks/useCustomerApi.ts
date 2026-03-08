@@ -1,16 +1,11 @@
 // src/hooks/useCustomerApi.ts
-// PHASE 8 FIXES:
-//   [FIX 1] useCustomerBookings — profiles!worker_id now joins
-//     worker_profiles(rating) so workerRating reflects the DB value
-//     instead of hardcoded 0.
-//   [FIX 2] useBookingDetail — same join added.
-//   [FIX 3] useCustomerDashboard — same join added.
-//   [FIX 4] useSubmitReview — removed broken client-side
-//     UPDATE worker_profiles. worker_profiles has no RLS policies so the
-//     UPDATE was silently blocked. Rating is now recalculated by the
-//     DB trigger `on_review_inserted` (phase8_rating_trigger.sql).
-//   [FIX 5] extractWorkerRating() helper — safe traversal of the nested
-//     worker_profiles object returned by Supabase (can be object or array).
+// POLISH FIXES:
+//   [POLISH 1] BookJobInput extended with budget + photoUrls
+//   [POLISH 1] useBookJob INSERT saves estimated_price + photo_urls to DB
+//   [POLISH 1] Booking type extended with photoUrls field
+//   [POLISH 1] useBookingDetail fetches photo_urls from DB
+//   [FIX] All .map() Booking builders now include latitude/longitude
+//         so TypeScript is satisfied on ts(2739) lines 539/547/554
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
@@ -56,8 +51,8 @@ export interface Booking {
   serviceType: string;
   description: string;
   address: string;
-  latitude:  number | null;   // [PHASE 11] job location coordinates
-  longitude: number | null;   // [PHASE 11] job location coordinates
+  latitude:  number | null;
+  longitude: number | null;
   date: string;
   time: string;
   status: "pending" | "accepted" | "en_route" | "in_progress" | "completed" | "cancelled";
@@ -66,6 +61,7 @@ export interface Booking {
   paymentStatus: "pending" | "paid" | "refunded";
   eta?: string;
   workerDistance?: string;
+  photoUrls: string[];   // [POLISH 1] customer-uploaded job photos
 }
 
 export interface DashboardData {
@@ -73,22 +69,27 @@ export interface DashboardData {
   recentWorkers: WorkerCard[];
 }
 
+// [POLISH 1] Extended with budget + photoUrls
 export interface BookJobInput {
-  workerId: string;
-  categorySlug: string;
-  description: string;
-  address: string;
-  latitude:  number | null;   // [PHASE 11] geocoded from address in BookService
-  longitude: number | null;   // [PHASE 11] geocoded from address in BookService
-  date: string;
-  timeSlot: string;
-  urgency: "normal" | "urgent";
+  workerId:      string;
+  categorySlug:  string;
+  description:   string;
+  address:       string;
+  latitude:      number | null;
+  longitude:     number | null;
+  date:          string;
+  timeSlot:      string;
+  urgency:       "normal" | "urgent";
   requiredTools: string[];
+  budget?:       number | null;   // [POLISH 1] customer-specified budget
+  photoUrls?:    string[];        // [POLISH 1] uploaded job photos
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TIME SLOT MAP
+// HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const TIME_SLOT_HOURS: Record<string, number> = {
   Morning:   9,
@@ -96,12 +97,6 @@ const TIME_SLOT_HOURS: Record<string, number> = {
   Evening:   18,
   Urgent:    new Date().getHours() + 1,
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// HELPER — safely extract worker_profiles.rating from a joined profiles row
-// Supabase can return nested relations as either an object or a single-item
-// array. This helper handles both.
-// ─────────────────────────────────────────────────────────────────────────────
 
 function extractWorkerRating(profileRow: unknown): number {
   if (!profileRow || typeof profileRow !== "object") return 0;
@@ -113,18 +108,11 @@ function extractWorkerRating(profileRow: unknown): number {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// REAL HOOK — Available Workers
+// FastAPI Matching Engine
 // ─────────────────────────────────────────────────────────────────────────────
-
-// ─── FastAPI Matching Engine URL ──────────────────────────────────────────────
-// Set VITE_MATCHING_API_URL in your .env file:
-//   VITE_MATCHING_API_URL=https://gigmatcher-api.onrender.com
-// Falls back to Supabase direct queries if env var not set.
 
 const MATCHING_API_URL = (import.meta.env.VITE_MATCHING_API_URL as string | undefined)
   ?.replace(/\/$/, "") ?? null;
-
-// ─── FastAPI response shape ───────────────────────────────────────────────────
 
 interface ApiWorkerResult {
   id:                 string;
@@ -144,15 +132,15 @@ interface ApiWorkerResult {
   is_pro:             boolean;
 }
 
-// ─── Sort helper (used by fallback Supabase path) ────────────────────────────
-
 function sortWorkers(workers: WorkerCard[], sort: string): WorkerCard[] {
-  if (sort === "rating")   return [...workers].sort((a, b) => b.rating - a.rating);
-  if (sort === "price")    return [...workers].sort((a, b) => a.rate - b.rate);
+  if (sort === "rating") return [...workers].sort((a, b) => b.rating - a.rating);
+  if (sort === "price")  return [...workers].sort((a, b) => a.rate - b.rate);
   return workers;
 }
 
-// ─── Real: Available Workers — FastAPI Matching Engine ────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// REAL HOOK — Available Workers
+// ─────────────────────────────────────────────────────────────────────────────
 
 export function useAvailableWorkers(filters: {
   sort: string;
@@ -165,43 +153,32 @@ export function useAvailableWorkers(filters: {
     queryKey: ["customer", "workers", filters],
     queryFn: async (): Promise<WorkerCard[]> => {
 
-      // ── No category selected → mock workers ──────────────────────────────
       if (!filters.categorySlug) {
         await delay(400);
         return sortWorkers([...MOCK_WORKERS], filters.sort);
       }
 
-      // ── FastAPI path ──────────────────────────────────────────────────────
+      // FastAPI path
       if (MATCHING_API_URL) {
         try {
           const body = {
             category_slug:  filters.categorySlug,
             required_tools: filters.requiredTools ?? [],
             sort:           filters.sort,
-            customer_lat:   filters.customerLat   ?? null,
-            customer_lng:   filters.customerLng   ?? null,
+            customer_lat:   filters.customerLat  ?? null,
+            customer_lng:   filters.customerLng  ?? null,
           };
-
-          console.log("[useAvailableWorkers] Calling FastAPI:", MATCHING_API_URL, body);
-
           const res = await fetch(`${MATCHING_API_URL}/match`, {
             method:  "POST",
             headers: { "Content-Type": "application/json" },
             body:    JSON.stringify(body),
           });
-
           if (!res.ok) {
             const errText = await res.text().catch(() => "Unknown error");
-            console.error("[useAvailableWorkers] API error:", res.status, errText);
             throw new Error(`Matching API error ${res.status}: ${errText}`);
           }
-
-          const json = await res.json() as { workers?: ApiWorkerResult[]; total?: number };
-          console.log("[useAvailableWorkers] API response:", json);
-
-          const workers = json.workers ?? [];
-
-          return workers.map((w): WorkerCard => ({
+          const json = await res.json() as { workers?: ApiWorkerResult[] };
+          return (json.workers ?? []).map((w): WorkerCard => ({
             id:               w.id               ?? "",
             name:             w.name             ?? "Worker",
             photo:            w.photo            ?? "",
@@ -217,17 +194,14 @@ export function useAvailableWorkers(filters: {
             availableDays:    Array.isArray(w.availability_days)
                                 ? w.availability_days
                                 : [true, true, true, true, true, true, true],
-            reviews:          [],
+            reviews: [],
           }));
-
         } catch (err) {
-          console.error("[useAvailableWorkers] FastAPI call failed, falling back to Supabase:", err);
-          // Fall through to Supabase fallback below
+          console.error("[useAvailableWorkers] FastAPI failed, falling back:", err);
         }
       }
 
-      // ── Fallback: direct Supabase ─────────────────────────────────────────
-      console.log("[useAvailableWorkers] Using Supabase fallback");
+      // Supabase fallback
       const selectedSvc = SERVICE_CATEGORIES.find((s) => s.id === filters.categorySlug);
       if (!selectedSvc) return [];
 
@@ -266,16 +240,24 @@ export function useAvailableWorkers(filters: {
           .filter((s) => s.worker_id === wp.user_id)
           .map((s) => (s.service_categories as unknown as { name: string } | null)?.name ?? "")
           .filter(Boolean);
-        const missing = requiredTools.filter((t) => !toolNames.map((wt) => wt.toLowerCase()).includes(t.toLowerCase()));
+        const missing = requiredTools.filter(
+          (t) => !toolNames.map((wt) => wt.toLowerCase()).includes(t.toLowerCase())
+        );
         return {
-          id: wp.user_id, name: profile?.full_name ?? "Worker",
-          photo: profile?.profile_photo_url ?? "", rating: wp.rating ?? 0,
-          reviewCount: wp.total_reviews ?? 0, distance: "—", rate: wp.hourly_rate ?? 0,
-          skills: skillNames, tools: toolNames,
-          hasAllTools: missing.length === 0, missingToolCount: missing.length,
-          available: wp.is_available,
-          availableDays: (wp.availability_days as boolean[] | null) ?? [true,true,true,true,true,true,true],
-          reviews: [],
+          id:              wp.user_id,
+          name:            profile?.full_name ?? "Worker",
+          photo:           profile?.profile_photo_url ?? "",
+          rating:          wp.rating ?? 0,
+          reviewCount:     wp.total_reviews ?? 0,
+          distance:        "—",
+          rate:            wp.hourly_rate ?? 0,
+          skills:          skillNames,
+          tools:           toolNames,
+          hasAllTools:     missing.length === 0,
+          missingToolCount: missing.length,
+          available:       wp.is_available,
+          availableDays:   (wp.availability_days as boolean[] | null) ?? [true,true,true,true,true,true,true],
+          reviews:         [],
         };
       });
 
@@ -343,7 +325,7 @@ export function useWorkerPublicProfile(id: string) {
         skills, tools,
         hasAllTools: true, missingToolCount: 0,
         available:    wp?.is_available ?? false,
-        availableDays: (wp?.availability_days as boolean[] | null) ?? [true, true, true, true, true, true, true],
+        availableDays: (wp?.availability_days as boolean[] | null) ?? [true,true,true,true,true,true,true],
         reviews,
       };
     },
@@ -352,6 +334,7 @@ export function useWorkerPublicProfile(id: string) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REAL HOOK — Book a Worker
+// [POLISH 1] Saves budget as estimated_price + photo_urls to DB
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function useBookJob() {
@@ -367,7 +350,6 @@ export function useBookJob() {
 
       const { data: catData, error: catError } = await supabase
         .from("service_categories").select("id").eq("name", selectedSvc.label).single();
-
       if (catError || !catData) throw new Error("Service category not found in database");
 
       let scheduledTime: string | null = null;
@@ -387,11 +369,12 @@ export function useBookJob() {
           required_tools:  input.requiredTools,
           urgency:         input.urgency,
           scheduled_time:  scheduledTime,
-          address:         input.address || null,
-          latitude:        input.latitude  ?? null,   // [PHASE 11] real geocoded coords
-          longitude:       input.longitude ?? null,   // [PHASE 11] real geocoded coords
+          address:         input.address  || null,
+          latitude:        input.latitude  ?? null,
+          longitude:       input.longitude ?? null,
           status:          "pending",
-          estimated_price: null,
+          estimated_price: input.budget    ?? null,   // [POLISH 1] customer budget
+          photo_urls:      input.photoUrls ?? [],     // [POLISH 1] uploaded photos
         })
         .select("id")
         .single();
@@ -423,6 +406,7 @@ export function useCustomerDashboard() {
         .from("jobs")
         .select(`
           id, status, estimated_price, scheduled_time, worker_id, category_id,
+          latitude, longitude,
           service_categories ( name ),
           profiles!worker_id ( full_name, phone, profile_photo_url, worker_profiles ( rating ) )
         `)
@@ -446,6 +430,8 @@ export function useCustomerDashboard() {
           serviceType:  (cat as { name?: string } | null)?.name ?? "Service",
           description:  "",
           address:      "",
+          latitude:     (job as { latitude?: number | null }).latitude  ?? null,
+          longitude:    (job as { longitude?: number | null }).longitude ?? null,
           date:   dt ? dt.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "TBD",
           time:   dt ? dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "",
           status: job.status as Booking["status"],
@@ -453,6 +439,7 @@ export function useCustomerDashboard() {
           paymentMethod: "Cash",
           paymentStatus: "pending",
           eta:           undefined,
+          photoUrls:     [],
         };
       });
 
@@ -474,10 +461,10 @@ export function useCustomerDashboard() {
         if (!job.worker_id || seenWorkerIds.has(job.worker_id)) continue;
         if (recentWorkers.length >= 5) break;
         seenWorkerIds.add(job.worker_id);
-        const p  = Array.isArray(job.profiles) ? job.profiles[0] : job.profiles;
+        const p    = Array.isArray(job.profiles) ? job.profiles[0] : job.profiles;
         const pObj = p as { full_name?: string; profile_photo_url?: string; worker_profiles?: unknown } | null;
         const wpRaw = pObj?.worker_profiles;
-        const wp = Array.isArray(wpRaw) ? wpRaw[0] : wpRaw;
+        const wp    = Array.isArray(wpRaw) ? wpRaw[0] : wpRaw;
         recentWorkers.push({
           id:    job.worker_id,
           name:  pObj?.full_name ?? "Worker",
@@ -495,10 +482,236 @@ export function useCustomerDashboard() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MOCK DATA
+// REAL HOOK — Customer Bookings list
 // ─────────────────────────────────────────────────────────────────────────────
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+export function useCustomerBookings(tab: "active" | "pending" | "completed" | "cancelled") {
+  const { user } = useAuth();
+  return useQuery<Booking[]>({
+    queryKey: ["customer", "bookings", tab, user?.id],
+    enabled: !!user?.id,
+    queryFn: async () => {
+      const userId = user!.id;
+
+      const statusFilter: Record<typeof tab, string[]> = {
+        active:    ["accepted", "en_route", "in_progress"],
+        pending:   ["pending"],
+        completed: ["completed"],
+        cancelled: ["cancelled"],
+      };
+
+      const { data, error } = await supabase
+        .from("jobs")
+        .select(`
+          id, status, estimated_price, scheduled_time,
+          description, address, worker_id,
+          latitude, longitude,
+          service_categories ( name ),
+          profiles!worker_id ( full_name, phone, profile_photo_url, worker_profiles ( rating ) )
+        `)
+        .eq("customer_id", userId)
+        .in("status", statusFilter[tab])
+        .order("created_at", { ascending: false });
+
+      if (error) throw new Error(error.message);
+
+      return (data ?? []).map((job): Booking => {
+        const cat     = Array.isArray(job.service_categories) ? job.service_categories[0] : job.service_categories;
+        const wp      = Array.isArray(job.profiles) ? job.profiles[0] : job.profiles;
+        const dt      = job.scheduled_time ? new Date(job.scheduled_time) : null;
+        const dateStr = dt ? dt.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "TBD";
+        const timeStr = dt ? dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
+
+        return {
+          id:           job.id,
+          workerId:     job.worker_id ?? "",
+          workerName:   (wp as { full_name?: string } | null)?.full_name ?? (job.worker_id ? "Awaiting worker" : "Finding worker…"),
+          workerPhoto:  (wp as { profile_photo_url?: string } | null)?.profile_photo_url ?? "",
+          workerPhone:  (wp as { phone?: string } | null)?.phone ?? "",
+          workerRating: extractWorkerRating(wp),
+          serviceType:  (cat as { name?: string } | null)?.name ?? "Service",
+          description:  job.description ?? "",
+          address:      job.address ?? "",
+          latitude:     (job as { latitude?: number | null }).latitude  ?? null,
+          longitude:    (job as { longitude?: number | null }).longitude ?? null,
+          date:         dateStr,
+          time:         timeStr,
+          status:       job.status as Booking["status"],
+          payment:      job.estimated_price ?? 0,
+          paymentMethod:  "Cash",
+          paymentStatus:  job.status === "completed" ? "paid" : "pending",
+          eta:          undefined,
+          photoUrls:    [],
+        };
+      });
+    },
+    refetchInterval: 30000,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REAL HOOK — Booking Detail
+// [POLISH 1] Fetches photo_urls from DB
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function useBookingDetail(id: string) {
+  const { user } = useAuth();
+  return useQuery<Booking>({
+    queryKey: ["customer", "booking", id],
+    enabled: !!id && !!user?.id,
+    refetchInterval: 15000,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from("jobs")
+        .select(`
+          id, status, estimated_price, scheduled_time,
+          description, address, worker_id, urgency,
+          latitude, longitude, photo_urls,
+          service_categories ( name ),
+          profiles!worker_id ( full_name, phone, profile_photo_url, worker_profiles ( rating ) )
+        `)
+        .eq("id", id)
+        .eq("customer_id", user!.id)
+        .single();
+
+      if (error) throw new Error(error.message);
+      if (!data)  throw new Error("Booking not found");
+
+      const cat = Array.isArray(data.service_categories) ? data.service_categories[0] : data.service_categories;
+      const wp  = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
+      const dt  = data.scheduled_time ? new Date(data.scheduled_time) : null;
+
+      return {
+        id:           data.id,
+        workerId:     data.worker_id ?? "",
+        workerName:   (wp as { full_name?: string } | null)?.full_name ?? (data.worker_id ? "Awaiting worker" : "Finding worker…"),
+        workerPhoto:  (wp as { profile_photo_url?: string } | null)?.profile_photo_url ?? "",
+        workerPhone:  (wp as { phone?: string } | null)?.phone ?? "",
+        workerRating: extractWorkerRating(wp),
+        serviceType:  (cat as { name?: string } | null)?.name ?? "Service",
+        description:  data.description ?? "",
+        address:      data.address ?? "",
+        latitude:     (data as { latitude?: number | null }).latitude  ?? null,
+        longitude:    (data as { longitude?: number | null }).longitude ?? null,
+        date: dt ? dt.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "TBD",
+        time: dt ? dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "",
+        status:        data.status as Booking["status"],
+        payment:       data.estimated_price ?? 0,
+        paymentMethod: "Cash",
+        paymentStatus: data.status === "completed" ? "paid" : "pending",
+        eta:           undefined,
+        photoUrls:     (data as { photo_urls?: string[] }).photo_urls ?? [],  // [POLISH 1]
+      };
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REAL HOOK — Cancel Booking
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function useCancelBooking() {
+  const { user } = useAuth();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (jobId: string) => {
+      const { error } = await supabase
+        .from("jobs")
+        .update({ status: "cancelled" })
+        .eq("id", jobId)
+        .eq("customer_id", user!.id);
+      if (error) throw new Error(error.message);
+      return jobId;
+    },
+    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["customer"] }); },
+    onError: (err: Error) => { toast({ title: "Could not cancel booking", description: err.message }); },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REAL HOOK — Submit Review
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function useSubmitReview() {
+  const { user } = useAuth();
+  const qc = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (data: { bookingId: string; rating: number; comment: string }) => {
+      if (!user?.id) throw new Error("Not authenticated");
+
+      const { data: job, error: jobErr } = await supabase
+        .from("jobs")
+        .select("worker_id, customer_id, status")
+        .eq("id", data.bookingId)
+        .single();
+
+      if (jobErr || !job) throw new Error("Job not found");
+      if (job.status !== "completed") throw new Error("Can only review completed jobs");
+      if (!job.worker_id) throw new Error("No worker assigned to this job");
+
+      const { error: reviewErr } = await supabase
+        .from("reviews")
+        .insert({
+          job_id:      data.bookingId,
+          reviewer_id: user.id,
+          reviewee_id: job.worker_id,
+          rating:      data.rating,
+          comment:     data.comment?.trim() || null,
+        });
+
+      if (reviewErr) {
+        if (reviewErr.code === "23505") throw new Error("You have already reviewed this job");
+        throw new Error(reviewErr.message);
+      }
+
+      return { jobId: data.bookingId, workerId: job.worker_id };
+    },
+    onSuccess: (result) => {
+      void qc.invalidateQueries({ queryKey: ["customer"] });
+      void qc.invalidateQueries({ queryKey: ["customer", "worker", result?.workerId] });
+      void qc.invalidateQueries({ queryKey: ["worker"] });
+    },
+    onError: (err: Error) => {
+      toast({ title: "Could not submit review", description: err.message });
+    },
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STATIC DATA
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const SERVICE_CATEGORIES = [
+  { id: "plumber",     label: "Plumber",     icon: "🔧" },
+  { id: "electrician", label: "Electrician", icon: "⚡" },
+  { id: "carpenter",   label: "Carpenter",   icon: "🪚" },
+  { id: "tailor",      label: "Tailor",      icon: "🧵" },
+  { id: "mechanic",    label: "Mechanic",    icon: "🔩" },
+  { id: "painter",     label: "Painter",     icon: "🎨" },
+];
+
+export const TOOLS_BY_SERVICE: Record<string, string[]> = {
+  plumber:     ["Pipe Wrench", "Teflon Tape", "Basin Wrench", "Plunger"],
+  electrician: ["Multimeter", "Wire Cutter", "Screwdriver Set", "Voltage Tester"],
+  carpenter:   ["Saw", "Hammer", "Measuring Tape", "Chisel Set"],
+  tailor:      ["Sewing Machine", "Scissors", "Measuring Tape", "Iron"],
+  mechanic:    ["Wrench Set", "Jack", "Screwdriver Set", "Pliers"],
+  painter:     ["Roller Set", "Masking Tape", "Drop Cloth", "Brush Set"],
+};
+
+export const PRICE_ESTIMATES: Record<string, string> = {
+  plumber:     "₹200–₹800",
+  electrician: "₹300–₹1,000",
+  carpenter:   "₹500–₹2,500",
+  tailor:      "₹150–₹600",
+  mechanic:    "₹400–₹1,500",
+  painter:     "₹500–₹3,000",
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MOCK DATA
+// ─────────────────────────────────────────────────────────────────────────────
 
 const MOCK_WORKERS: WorkerCard[] = [
   {
@@ -533,258 +746,3 @@ const MOCK_WORKERS: WorkerCard[] = [
     ],
   },
 ];
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const MOCK_BOOKINGS: Booking[] = [
-  {
-    id: "b-1", workerId: "w-1", workerName: "Rajesh Kumar", workerPhoto: "",
-    workerPhone: "+91 98765 43210", workerRating: 4.8,
-    serviceType: "Electrician", description: "Fix ceiling fan and install new switch board",
-    address: "14, Vijay Nagar, Indore", date: "Today", time: "2:00 PM",
-    status: "en_route", payment: 850, paymentMethod: "Cash", paymentStatus: "pending",
-    eta: "15 min", workerDistance: "2.3 km",
-  },
-  {
-    id: "b-2", workerId: "w-2", workerName: "Sunil Yadav", workerPhoto: "",
-    workerPhone: "+91 87654 32109", workerRating: 4.5,
-    serviceType: "Plumber", description: "Kitchen tap leaking",
-    address: "221, Palasia Square, Indore", date: "Tomorrow", time: "10:00 AM",
-    status: "pending", payment: 600, paymentMethod: "UPI", paymentStatus: "pending",
-  },
-  {
-    id: "b-3", workerId: "w-3", workerName: "Vikram Singh", workerPhoto: "",
-    workerPhone: "+91 76543 21098", workerRating: 4.9,
-    serviceType: "Carpenter", description: "Custom bookshelf",
-    address: "45, Scheme 78, Indore", date: "Feb 20", time: "11:00 AM",
-    status: "completed", payment: 1200, paymentMethod: "Cash", paymentStatus: "paid",
-  },
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REAL HOOK — Customer Bookings list (tab-filtered)
-// [PHASE 8 FIX] Added worker_profiles(rating) to join
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function useCustomerBookings(tab: "active" | "pending" | "completed" | "cancelled") {
-  const { user } = useAuth();
-  return useQuery<Booking[]>({
-    queryKey: ["customer", "bookings", tab, user?.id],
-    enabled: !!user?.id,
-    queryFn: async () => {
-      const userId = user!.id;
-
-      const statusFilter: Record<typeof tab, string[]> = {
-        active:    ["accepted", "en_route", "in_progress"],
-        pending:   ["pending"],
-        completed: ["completed"],
-        cancelled: ["cancelled"],
-      };
-
-      const { data, error } = await supabase
-        .from("jobs")
-        .select(`
-          id, status, estimated_price, scheduled_time,
-          description, address, worker_id,
-          service_categories ( name ),
-          profiles!worker_id ( full_name, phone, profile_photo_url, worker_profiles ( rating ) )
-        `)
-        .eq("customer_id", userId)
-        .in("status", statusFilter[tab])
-        .order("created_at", { ascending: false });
-
-      if (error) throw new Error(error.message);
-
-      return (data ?? []).map((job) => {
-        const cat     = Array.isArray(job.service_categories) ? job.service_categories[0] : job.service_categories;
-        const wp      = Array.isArray(job.profiles) ? job.profiles[0] : job.profiles;
-        const dt      = job.scheduled_time ? new Date(job.scheduled_time) : null;
-        const dateStr = dt ? dt.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "TBD";
-        const timeStr = dt ? dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "";
-
-        return {
-          id:           job.id,
-          workerId:     job.worker_id ?? "",
-          workerName:   (wp as { full_name?: string } | null)?.full_name ?? (job.worker_id ? "Awaiting worker" : "Finding worker…"),
-          workerPhoto:  (wp as { profile_photo_url?: string } | null)?.profile_photo_url ?? "",
-          workerPhone:  (wp as { phone?: string } | null)?.phone ?? "",
-          workerRating: extractWorkerRating(wp),
-          serviceType:  (cat as { name?: string } | null)?.name ?? "Service",
-          description:  job.description ?? "",
-          address:      job.address ?? "",
-          date:         dateStr,
-          time:         timeStr,
-          status:       job.status as Booking["status"],
-          payment:      job.estimated_price ?? 0,
-          paymentMethod:  "Cash",
-          paymentStatus:  job.status === "completed" ? "paid" : "pending",
-          eta:          undefined,
-        } as Booking;
-      });
-    },
-    refetchInterval: 30000,
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REAL HOOK — Booking Detail
-// [PHASE 8 FIX] Added worker_profiles(rating) to join
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function useBookingDetail(id: string) {
-  const { user } = useAuth();
-  return useQuery<Booking>({
-    queryKey: ["customer", "booking", id],
-    enabled: !!id && !!user?.id,
-    refetchInterval: 15000,
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("jobs")
-        .select(`
-          id, status, estimated_price, scheduled_time,
-          description, address, worker_id, urgency,
-          latitude, longitude,
-          service_categories ( name ),
-          profiles!worker_id ( full_name, phone, profile_photo_url, worker_profiles ( rating ) )
-        `)
-        .eq("id", id)
-        .eq("customer_id", user!.id)
-        .single();
-
-      if (error) throw new Error(error.message);
-      if (!data)  throw new Error("Booking not found");
-
-      const cat = Array.isArray(data.service_categories) ? data.service_categories[0] : data.service_categories;
-      const wp  = Array.isArray(data.profiles) ? data.profiles[0] : data.profiles;
-      const dt  = data.scheduled_time ? new Date(data.scheduled_time) : null;
-
-      return {
-        id:           data.id,
-        workerId:     data.worker_id ?? "",
-        workerName:   (wp as { full_name?: string } | null)?.full_name ?? (data.worker_id ? "Awaiting worker" : "Finding worker…"),
-        workerPhoto:  (wp as { profile_photo_url?: string } | null)?.profile_photo_url ?? "",
-        workerPhone:  (wp as { phone?: string } | null)?.phone ?? "",
-        workerRating: extractWorkerRating(wp),
-        serviceType:  (cat as { name?: string } | null)?.name ?? "Service",
-        description:  data.description ?? "",
-        address:      data.address ?? "",
-        latitude:     (data as { latitude?: number | null }).latitude  ?? null,
-        longitude:    (data as { longitude?: number | null }).longitude ?? null,
-        date: dt ? dt.toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "TBD",
-        time: dt ? dt.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" }) : "",
-        status:        data.status as Booking["status"],
-        payment:       data.estimated_price ?? 0,
-        paymentMethod: "Cash",
-        paymentStatus: data.status === "completed" ? "paid" : "pending",
-        eta:           undefined,
-      } as Booking;
-    },
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REAL HOOK — Cancel Booking
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function useCancelBooking() {
-  const { user } = useAuth();
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async (jobId: string) => {
-      const { error } = await supabase
-        .from("jobs")
-        .update({ status: "cancelled" })
-        .eq("id", jobId)
-        .eq("customer_id", user!.id);
-      if (error) throw new Error(error.message);
-      return jobId;
-    },
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["customer"] }); },
-    onError: (err: Error) => { toast({ title: "Could not cancel booking", description: err.message }); },
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// REAL HOOK — Submit Review (customer → worker)
-// [PHASE 8 FIX] Removed broken client-side UPDATE worker_profiles.rating.
-// worker_profiles has no RLS policies — the UPDATE was silently blocked.
-// Rating is now recalculated by DB trigger `on_review_inserted`.
-// Prerequisite: run phase8_rating_trigger.sql in Supabase SQL Editor.
-// ─────────────────────────────────────────────────────────────────────────────
-
-export function useSubmitReview() {
-  const { user } = useAuth();
-  const qc = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (data: { bookingId: string; rating: number; comment: string }) => {
-      if (!user?.id) throw new Error("Not authenticated");
-
-      const { data: job, error: jobErr } = await supabase
-        .from("jobs")
-        .select("worker_id, customer_id, status")
-        .eq("id", data.bookingId)
-        .single();
-
-      if (jobErr || !job) throw new Error("Job not found");
-      if (job.status !== "completed") throw new Error("Can only review completed jobs");
-      if (!job.worker_id) throw new Error("No worker assigned to this job");
-
-      // INSERT — DB trigger recalculates worker_profiles.rating automatically
-      const { error: reviewErr } = await supabase
-        .from("reviews")
-        .insert({
-          job_id:      data.bookingId,
-          reviewer_id: user.id,
-          reviewee_id: job.worker_id,
-          rating:      data.rating,
-          comment:     data.comment?.trim() || null,
-        });
-
-      if (reviewErr) {
-        if (reviewErr.code === "23505") throw new Error("You have already reviewed this job");
-        throw new Error(reviewErr.message);
-      }
-
-      return { jobId: data.bookingId, workerId: job.worker_id };
-    },
-    onSuccess: (result) => {
-      void qc.invalidateQueries({ queryKey: ["customer"] });
-      void qc.invalidateQueries({ queryKey: ["customer", "worker", result?.workerId] });
-      void qc.invalidateQueries({ queryKey: ["worker"] });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Could not submit review", description: err.message });
-    },
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// STATIC DATA
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const SERVICE_CATEGORIES = [
-  { id: "plumber",     label: "Plumber",    icon: "🔧" },
-  { id: "electrician", label: "Electrician", icon: "⚡" },
-  { id: "carpenter",   label: "Carpenter",   icon: "🪚" },
-  { id: "tailor",      label: "Tailor",      icon: "🧵" },
-  { id: "mechanic",    label: "Mechanic",    icon: "🔩" },
-  { id: "painter",     label: "Painter",     icon: "🎨" },
-];
-
-export const TOOLS_BY_SERVICE: Record<string, string[]> = {
-  plumber:     ["Pipe Wrench", "Teflon Tape", "Basin Wrench", "Plunger"],
-  electrician: ["Multimeter", "Wire Cutter", "Screwdriver Set", "Voltage Tester"],
-  carpenter:   ["Saw", "Hammer", "Measuring Tape", "Chisel Set"],
-  tailor:      ["Sewing Machine", "Scissors", "Measuring Tape", "Iron"],
-  mechanic:    ["Wrench Set", "Jack", "Screwdriver Set", "Pliers"],
-  painter:     ["Roller Set", "Masking Tape", "Drop Cloth", "Brush Set"],
-};
-
-export const PRICE_ESTIMATES: Record<string, string> = {
-  plumber:     "₹200–₹800",
-  electrician: "₹300–₹1,000",
-  carpenter:   "₹500–₹2,500",
-  tailor:      "₹150–₹600",
-  mechanic:    "₹400–₹1,500",
-  painter:     "₹500–₹3,000",
-};

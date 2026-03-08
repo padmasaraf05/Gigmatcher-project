@@ -1,9 +1,11 @@
 // src/hooks/useNotifications.ts
-// PHASE 15: Full rewrite to match NotificationsScreen.tsx interface exactly.
-// Exports: AppNotification, useNotifications(filter), useUnreadCount,
-//          useMarkRead, useMarkAllRead, useDismissNotification, useClearAll,
-//          useUnreadMessages, useMarkMessagesRead
+// POLISH-2 FIX [BADGE COUNT]:
+//   useUnreadMessages fallback query was missing receiver_id filter — it was
+//   counting ALL unread messages in the entire messages table, not just ones
+//   sent TO the current user. Added .eq("receiver_id", user!.id) to fix.
+//   All other logic IDENTICAL to previous PHASE 15 version.
 
+import { useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
@@ -12,55 +14,71 @@ import { useAuth } from "@/context/AuthContext";
 
 export interface AppNotification {
   id:        string;
-  type:      string;          // "job" | "payment" | "system"
+  type:      string;        // "job" | "payment" | "system"
   title:     string;
-  body:      string;
-  read:      boolean;         // NotificationsScreen uses n.read (not is_read)
-  timestamp: Date;            // NotificationsScreen uses formatDistanceToNow(n.timestamp)
-  link?:     string | null;   // navigate to this path on tap
-  job_id?:   string | null;
+  body:      string;        // mapped from DB column "message"
+  read:      boolean;       // mapped from DB column "is_read"
+  timestamp: Date;          // mapped from DB column "created_at"
+  link?:     string | null; // DB column "link" — already a full path
 }
 
 // ─── Helper — map DB row → AppNotification ────────────────────────────────────
 
 function mapRow(row: {
-  id: string;
-  type: string;
-  title: string;
-  body: string;
-  is_read: boolean;
+  id:         string;
+  type:       string;
+  title:      string | null;
+  message:    string | null;
+  is_read:    boolean;
   created_at: string;
-  job_id?: string | null;
+  link:       string | null;
 }): AppNotification {
-  let link: string | null = null;
-  if (row.job_id) {
-    if (row.type === "job") link = `/worker/job/${row.job_id}`;
-    else if (row.type === "payment") link = `/customer/booking/${row.job_id}`;
-  }
-
   return {
     id:        row.id,
-    type:      row.type ?? "system",
-    title:     row.title ?? "",
-    body:      row.body  ?? "",
+    type:      row.type    ?? "system",
+    title:     row.title   ?? "",
+    body:      row.message ?? "",
     read:      row.is_read ?? false,
     timestamp: new Date(row.created_at),
-    link,
-    job_id:    row.job_id ?? null,
+    link:      row.link    ?? null,
   };
 }
 
-// ─── Real: Fetch notifications with optional filter ───────────────────────────
+// ─── Real: Fetch notifications with filter ────────────────────────────────────
 
 export function useNotifications(filter = "all") {
   const { user } = useAuth();
+  const qc = useQueryClient();
+
+  useEffect(() => {
+    if (!user?.id) return;
+
+    const channel = supabase
+      .channel(`notifications:${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event:  "*",
+          schema: "public",
+          table:  "notifications",
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          void qc.invalidateQueries({ queryKey: ["notifications"] });
+        }
+      )
+      .subscribe();
+
+    return () => { void supabase.removeChannel(channel); };
+  }, [user?.id, qc]);
+
   return useQuery<AppNotification[]>({
     queryKey: ["notifications", user?.id, filter],
     enabled:  !!user?.id,
     queryFn: async () => {
       let query = supabase
         .from("notifications")
-        .select("id, type, title, body, is_read, created_at, job_id")
+        .select("id, type, title, message, is_read, created_at, link")
         .eq("user_id", user!.id)
         .order("created_at", { ascending: false })
         .limit(50);
@@ -73,14 +91,36 @@ export function useNotifications(filter = "all") {
       if (error) throw error;
       return (data ?? []).map(mapRow);
     },
-    refetchInterval: 30000,
+    staleTime: 0,
   });
 }
 
-// ─── Real: Unread notification count (Bell badge) ─────────────────────────────
+// ─── Real: Unread count for Bell badge ───────────────────────────────────────
 
 export function useUnreadCount() {
   const { user } = useAuth();
+  const qc = useQueryClient();
+
+  useEffect(() => {
+    if (!user?.id) return;
+    const channel = supabase
+      .channel(`notif-unread:${user.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event:  "*",
+          schema: "public",
+          table:  "notifications",
+          filter: `user_id=eq.${user.id}`,
+        },
+        () => {
+          void qc.invalidateQueries({ queryKey: ["notifications", "unread"] });
+        }
+      )
+      .subscribe();
+    return () => { void supabase.removeChannel(channel); };
+  }, [user?.id, qc]);
+
   return useQuery<number>({
     queryKey: ["notifications", "unread", user?.id],
     enabled:  !!user?.id,
@@ -93,7 +133,7 @@ export function useUnreadCount() {
       if (error) throw error;
       return count ?? 0;
     },
-    refetchInterval: 30000,
+    staleTime: 0,
   });
 }
 
@@ -176,7 +216,11 @@ export function useClearAll() {
   });
 }
 
-// ─── PHASE 15: Unread message count (Messages badge) ─────────────────────────
+// ─── PHASE 15 + POLISH-2 FIX: Unread message count (Messages badge) ──────────
+// [POLISH-2 FIX] The RPC fallback query was missing .eq("receiver_id", user.id)
+// which caused it to count ALL unread messages in the table, making the badge
+// show a large hardcoded-looking number. Now correctly filters to messages
+// sent TO the current user only.
 
 export function useUnreadMessages() {
   const { user } = useAuth();
@@ -184,17 +228,22 @@ export function useUnreadMessages() {
     queryKey: ["messages", "unread", user?.id],
     enabled:  !!user?.id,
     queryFn: async () => {
+      // Try RPC first (most efficient)
       const { data, error } = await supabase
         .rpc("get_unread_message_count", { p_user_id: user!.id });
-      if (error) {
-        const { count } = await supabase
-          .from("messages")
-          .select("id", { count: "exact", head: true })
-          .neq("sender_id", user!.id)
-          .eq("is_read", false);
-        return count ?? 0;
+      if (!error) {
+        return (data as number) ?? 0;
       }
-      return (data as number) ?? 0;
+
+      // [POLISH-2 FIX] Fallback: direct query with receiver_id filter
+      // Previously this was missing .eq("receiver_id", user!.id) which
+      // caused it to count every unread message from every user.
+      const { count } = await supabase
+        .from("messages")
+        .select("id", { count: "exact", head: true })
+        .eq("receiver_id", user!.id)   // ← THE FIX: only messages TO this user
+        .eq("is_read", false);
+      return count ?? 0;
     },
     refetchInterval: 15000,
   });

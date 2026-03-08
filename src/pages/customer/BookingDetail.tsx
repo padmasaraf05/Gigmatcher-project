@@ -1,8 +1,9 @@
 // src/pages/customer/BookingDetail.tsx
-// PHASE 11 FIX:
-//   [FIX] "Get Directions" button now opens Google Maps with real job coordinates.
-//         Falls back to address text search if coordinates are null.
-// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
+// POLISH-2 FIX [PHOTOS]:
+//   Added photo gallery section under Job Details to display customer-uploaded
+//   photos (booking.photoUrls). useBookingDetail already fetches photo_urls from
+//   DB and maps them to photoUrls — this file was the only missing piece.
+// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to previous version.
 
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -14,7 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import LoadingButton from "@/components/LoadingButton";
 import {
-  Star, Phone, MessageCircle, MapPin, Navigation, ChevronLeft,
+  Star, Phone, MessageCircle, MapPin, Navigation, ChevronLeft, ImageIcon, X,
 } from "lucide-react";
 import PaymentInfoCard from "@/components/PaymentInfoCard";
 import { toast } from "@/hooks/use-toast";
@@ -26,9 +27,11 @@ export default function BookingDetail() {
   const cancelBooking = useCancelBooking();
   const submitReview = useSubmitReview();
 
-  const [showCancel, setShowCancel] = useState(false);
-  const [rating, setRating] = useState(0);
-  const [comment, setComment] = useState("");
+  const [showCancel, setShowCancel]       = useState(false);
+  const [rating, setRating]               = useState(0);
+  const [comment, setComment]             = useState("");
+  // [POLISH-2 FIX] lightbox state for full-screen photo view
+  const [lightboxUrl, setLightboxUrl]     = useState<string | null>(null);
 
   if (isLoading) {
     return (
@@ -47,7 +50,7 @@ export default function BookingDetail() {
 
   const isLiveTracking = booking.status === "en_route" || booking.status === "in_progress";
 
-  // [FIX] Build Google Maps directions URL using real coordinates or address text
+  // [FIX from previous session] Build Google Maps directions URL
   const handleGetDirections = () => {
     let url: string;
     if (booking.latitude && booking.longitude) {
@@ -70,6 +73,9 @@ export default function BookingDetail() {
     await submitReview.mutateAsync({ bookingId: booking.id, rating, comment });
     toast({ title: "Review submitted! ⭐", description: "Thanks for your feedback" });
   };
+
+  // [POLISH-2 FIX] photos uploaded by customer when booking
+  const photoUrls: string[] = booking.photoUrls ?? [];
 
   return (
     <div className="px-4 py-5 space-y-5 animate-fade-in pb-8">
@@ -122,6 +128,32 @@ export default function BookingDetail() {
         </div>
       </div>
 
+      {/* [POLISH-2 FIX] Customer-uploaded photos gallery */}
+      {photoUrls.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <ImageIcon className="h-4 w-4 text-muted-foreground" />
+            <h4 className="text-sm font-bold text-foreground">Job Photos</h4>
+            <span className="text-xs text-muted-foreground">({photoUrls.length})</span>
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            {photoUrls.map((url, i) => (
+              <button
+                key={i}
+                onClick={() => setLightboxUrl(url)}
+                className="relative aspect-square rounded-lg overflow-hidden border border-border bg-muted hover:opacity-90 transition-opacity"
+              >
+                <img
+                  src={url}
+                  alt={`Job photo ${i + 1}`}
+                  className="w-full h-full object-cover"
+                />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Map — live for en_route/in_progress, static otherwise */}
       {isLiveTracking ? (
         <LiveLocationMap jobId={id!} isTracking={true} address={booking.address} />
@@ -133,7 +165,6 @@ export default function BookingDetail() {
               📍 {booking.address}
             </span>
           </div>
-          {/* [FIX] Get Directions now opens Google Maps */}
           <button
             onClick={handleGetDirections}
             className="touch-target w-full flex items-center justify-center gap-2 rounded-lg border border-border py-2.5 text-sm font-semibold text-primary transition-default hover:bg-primary/5"
@@ -209,6 +240,29 @@ export default function BookingDetail() {
                 Cancel
               </LoadingButton>
             </div>
+          </div>
+        </>
+      )}
+
+      {/* [POLISH-2 FIX] Full-screen photo lightbox */}
+      {lightboxUrl && (
+        <>
+          <div
+            className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center animate-fade-in"
+            onClick={() => setLightboxUrl(null)}
+          >
+            <button
+              onClick={() => setLightboxUrl(null)}
+              className="absolute top-4 right-4 h-10 w-10 rounded-full bg-white/20 flex items-center justify-center"
+            >
+              <X className="h-5 w-5 text-white" />
+            </button>
+            <img
+              src={lightboxUrl}
+              alt="Full size"
+              className="max-w-full max-h-full object-contain rounded-lg"
+              onClick={(e) => e.stopPropagation()}
+            />
           </div>
         </>
       )}

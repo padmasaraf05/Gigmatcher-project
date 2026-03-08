@@ -1,3 +1,11 @@
+// src/pages/worker/WorkerInvoice.tsx
+// POLISH [ISSUE 6]:
+//   Download PDF button now calls window.print() which triggers the browser's
+//   native print-to-PDF dialog. The page already has print:hidden classes on
+//   all non-invoice elements, so the printed output is a clean invoice.
+//   Share button copies a direct link to clipboard as fallback.
+// ALL JSX layout, Tailwind classes, data display — IDENTICAL to original.
+
 import { useParams, useNavigate } from "react-router-dom";
 import { useInvoice } from "@/hooks/usePaymentApi";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -20,24 +28,61 @@ export default function WorkerInvoice() {
   }
 
   if (!invoice) {
-    return <div className="app-shell min-h-screen bg-card px-4 py-10 text-center text-muted-foreground">Invoice not found</div>;
+    return (
+      <div className="app-shell min-h-screen bg-card px-4 py-10 text-center text-muted-foreground">
+        Invoice not found
+      </div>
+    );
   }
 
+  // [POLISH 6] Trigger browser print-to-PDF dialog
+  const handleDownloadPdf = () => {
+    // Small delay so any open menus/toasts dismiss first
+    setTimeout(() => {
+      window.print();
+    }, 100);
+  };
+
   const handleShare = async () => {
-    if (navigator.share) {
+    const shareUrl = window.location.href;
+    const shareData = {
+      title: `Invoice ${invoice.invoiceNumber}`,
+      text:  `GigMatcher invoice for ₹${invoice.grossAmount}`,
+      url:   shareUrl,
+    };
+
+    if (navigator.share && navigator.canShare?.(shareData)) {
       try {
-        await navigator.share({ title: `Invoice ${invoice.invoiceNumber}`, text: `Invoice from GigMatcher - ₹${invoice.grossAmount}` });
-      } catch { /* user cancelled */ }
+        await navigator.share(shareData);
+      } catch {
+        // user cancelled — do nothing
+      }
     } else {
-      toast({ title: "Link copied!", description: "Invoice link copied to clipboard" });
+      // Fallback: copy link to clipboard
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        toast({ title: "Link copied!", description: "Invoice link copied to clipboard" });
+      } catch {
+        toast({ title: "Share unavailable", description: "Please copy the URL manually" });
+      }
     }
   };
 
   return (
     <div className="app-shell min-h-screen bg-card">
-      {/* No bottom nav — print-friendly */}
+      {/* Print styles injected inline so no separate CSS file is needed */}
+      <style>{`
+        @media print {
+          @page { margin: 16mm; size: A4 portrait; }
+          body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+      `}</style>
+
       <div className="px-5 py-5 space-y-5 animate-fade-in">
-        <button onClick={() => navigate(-1)} className="touch-target flex items-center gap-1 text-sm font-semibold text-primary print:hidden">
+        <button
+          onClick={() => navigate(-1)}
+          className="touch-target flex items-center gap-1 text-sm font-semibold text-primary print:hidden"
+        >
           <ChevronLeft className="h-4 w-4" /> Back
         </button>
 
@@ -45,7 +90,9 @@ export default function WorkerInvoice() {
         <div className="flex items-center justify-between border-b border-border pb-4">
           <div className="flex items-center gap-2">
             <Briefcase className="h-6 w-6 text-primary" />
-            <span className="text-lg font-bold text-foreground">Gig<span className="text-primary">Matcher</span></span>
+            <span className="text-lg font-bold text-foreground">
+              Gig<span className="text-primary">Matcher</span>
+            </span>
           </div>
           <div className="text-right">
             <p className="text-xs font-semibold text-foreground">{invoice.invoiceNumber}</p>
@@ -115,10 +162,10 @@ export default function WorkerInvoice() {
           <p className="text-3xl font-bold text-foreground">₹{invoice.grossAmount}</p>
         </div>
 
-        {/* Actions (hidden in print) */}
+        {/* [POLISH 6] Actions — Download PDF now calls window.print() */}
         <div className="flex gap-2 print:hidden">
           <button
-            onClick={() => { toast({ title: "PDF downloading...", description: "Invoice saved to device" }); }}
+            onClick={handleDownloadPdf}
             className="flex-1 touch-target flex items-center justify-center gap-2 rounded-lg bg-primary py-3 text-sm font-semibold text-primary-foreground transition-default hover:bg-primary/90"
           >
             <Download className="h-4 w-4" /> Download PDF

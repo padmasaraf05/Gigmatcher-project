@@ -1,10 +1,8 @@
 // src/pages/customer/BookService.tsx
-// PHASE 11 FIX:
-//   [FIX 1] handleLocate() — real GPS + detailed reverse-geocode (street level)
-//   [FIX 2] handleSubmit() — geocodes manual address → lat/lng for job pin
-//   [FIX 3] Manual address input now shows Nominatim autocomplete suggestions
-//           as the user types (debounced 400ms, min 3 chars, India-biased)
-//   ALL JSX structure, Tailwind classes, UI elements — IDENTICAL to original.
+// POLISH:
+//   [POLISH 1] Replaced static "Estimated Price" section with manual budget input
+//   [POLISH 2] Added photo upload section (uploads to job-photos Supabase storage)
+// ALL other JSX structure, Tailwind classes, UI elements — IDENTICAL to original.
 
 import { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -12,10 +10,11 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Checkbox } from "@/components/ui/checkbox";
 import LoadingButton from "@/components/LoadingButton";
-import { SERVICE_CATEGORIES, TOOLS_BY_SERVICE, PRICE_ESTIMATES } from "@/hooks/useCustomerApi";
+import { SERVICE_CATEGORIES, TOOLS_BY_SERVICE } from "@/hooks/useCustomerApi";
 import { geocodeAddress, reverseGeocode, searchAddressSuggestions, type AddressSuggestion } from "@/lib/geocode";
-import { MapPin, Info } from "lucide-react";
+import { MapPin, Camera, X, IndianRupee } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabase";
 
 const TIME_SLOTS = ["Morning", "Afternoon", "Evening", "Urgent"];
 
@@ -36,20 +35,26 @@ export default function BookService() {
   const [locating, setLocating]           = useState(false);
   const [submitting, setSubmitting]       = useState(false);
 
-  // [FIX 3] Autocomplete state
-  const [suggestions, setSuggestions]     = useState<AddressSuggestion[]>([]);
+  // [POLISH 1] Customer budget
+  const [budget, setBudget] = useState("");
+
+  // [POLISH 2] Photo upload
+  const [photos, setPhotos]           = useState<{ file: File; preview: string }[]>([]);
+  const [uploadingPhotos, setUploadingPhotos] = useState(false);
+  const photoInputRef = useRef<HTMLInputElement>(null);
+
+  // Autocomplete state
+  const [suggestions, setSuggestions]         = useState<AddressSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
 
-  const tools    = category ? TOOLS_BY_SERVICE[category] || [] : [];
-  const estimate = category ? PRICE_ESTIMATES[category] : null;
+  const tools = category ? TOOLS_BY_SERVICE[category] || [] : [];
 
   useEffect(() => {
     if (category && tools.length > 0) setSelectedTools(tools);
   }, [category]);
 
-  // Dismiss suggestions on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (suggestionsRef.current && !suggestionsRef.current.contains(e.target as Node)) {
@@ -60,19 +65,11 @@ export default function BookService() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // [FIX 3] Debounced Nominatim autocomplete as user types
   const handleManualAddressChange = (value: string) => {
     setManualAddress(value);
     setGpsCoords(null);
-
     if (debounceRef.current) clearTimeout(debounceRef.current);
-
-    if (value.trim().length < 3) {
-      setSuggestions([]);
-      setShowSuggestions(false);
-      return;
-    }
-
+    if (value.trim().length < 3) { setSuggestions([]); setShowSuggestions(false); return; }
     debounceRef.current = setTimeout(async () => {
       const results = await searchAddressSuggestions(value);
       setSuggestions(results);
@@ -87,7 +84,6 @@ export default function BookService() {
     setShowSuggestions(false);
   };
 
-  // [FIX 1] Real GPS + detailed reverse-geocode (street level)
   const handleLocate = () => {
     if (!navigator.geolocation) {
       toast({ title: "GPS unavailable", description: "Your device does not support geolocation" });
@@ -106,24 +102,69 @@ export default function BookService() {
       },
       (err) => {
         setLocating(false);
-        toast({
-          title: "Could not get location",
-          description: err.message + " — please enter address manually",
-        });
+        toast({ title: "Could not get location", description: err.message + " — please enter address manually" });
       },
       { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
     );
   };
 
-  // [FIX 2] Geocode address → lat/lng then navigate with coordinates
+  // [POLISH 2] Handle photo selection + preview
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (photos.length + files.length > 5) {
+      toast({ title: "Max 5 photos", description: "You can upload up to 5 photos" });
+      return;
+    }
+    const newPhotos = files.map((file) => ({
+      file,
+      preview: URL.createObjectURL(file),
+    }));
+    setPhotos((p) => [...p, ...newPhotos]);
+    // Reset input so same file can be re-selected
+    if (photoInputRef.current) photoInputRef.current.value = "";
+  };
+
+  const removePhoto = (index: number) => {
+    setPhotos((p) => {
+      URL.revokeObjectURL(p[index].preview);
+      return p.filter((_, i) => i !== index);
+    });
+  };
+
+  // [POLISH 2] Upload photos to Supabase storage → return public URLs
+  const uploadPhotos = async (): Promise<string[]> => {
+    if (photos.length === 0) return [];
+    setUploadingPhotos(true);
+    const urls: string[] = [];
+    const timestamp = Date.now();
+
+    for (let i = 0; i < photos.length; i++) {
+      const { file } = photos[i];
+      const ext  = file.name.split(".").pop() ?? "jpg";
+      const path = `jobs/${timestamp}_${i}.${ext}`;
+
+      const { error } = await supabase.storage
+        .from("job-photos")
+        .upload(path, file, { upsert: false });
+
+      if (!error) {
+        const { data: u } = supabase.storage.from("job-photos").getPublicUrl(path);
+        urls.push(u.publicUrl);
+      }
+    }
+
+    setUploadingPhotos(false);
+    return urls;
+  };
+
   const handleSubmit = async () => {
     const addressText = manualAddress.trim() || location || "";
     let coords = gpsCoords;
 
+    setSubmitting(true);
+
     if (!coords && addressText) {
-      setSubmitting(true);
       coords = await geocodeAddress(addressText);
-      setSubmitting(false);
       if (!coords) {
         toast({
           title: "Address not found on map",
@@ -132,24 +173,30 @@ export default function BookService() {
       }
     }
 
+    // Upload photos first
+    const photoUrls = await uploadPhotos();
+
+    setSubmitting(false);
+
     navigate("/customer/worker-selection", {
       state: {
         category,
         description,
-        address:   addressText,
-        latitude:  coords?.lat ?? null,
-        longitude: coords?.lng ?? null,
+        address:       addressText,
+        latitude:      coords?.lat   ?? null,
+        longitude:     coords?.lng   ?? null,
         date,
         timeSlot,
         urgency,
         selectedTools,
+        budget:        budget ? parseFloat(budget) : null,  // [POLISH 1]
+        photoUrls,                                           // [POLISH 2]
       },
     });
   };
 
   const canSubmit = category && (location || manualAddress) && date && timeSlot;
 
-  // ── UI — IDENTICAL TO ORIGINAL ────────────────────────────────────────────
   return (
     <div className="px-4 py-5 space-y-6 animate-fade-in pb-6">
       <h2 className="text-xl font-bold text-foreground">Book a Service</h2>
@@ -186,14 +233,49 @@ export default function BookService() {
         />
       </div>
 
-      {/* Location — [FIX 1] real GPS, [FIX 3] autocomplete dropdown */}
+      {/* [POLISH 2] Photo Upload */}
+      <div className="space-y-2">
+        <label className="text-sm font-semibold text-foreground">
+          Upload Photos <span className="text-xs text-muted-foreground font-normal">(optional, max 5)</span>
+        </label>
+        <div className="flex gap-2 flex-wrap">
+          {photos.map((p, i) => (
+            <div key={i} className="relative h-20 w-20 rounded-xl overflow-hidden border border-border">
+              <img src={p.preview} alt="preview" className="h-full w-full object-cover" />
+              <button
+                onClick={() => removePhoto(i)}
+                className="absolute top-1 right-1 h-5 w-5 rounded-full bg-foreground/70 flex items-center justify-center"
+              >
+                <X className="h-3 w-3 text-background" />
+              </button>
+            </div>
+          ))}
+          {photos.length < 5 && (
+            <button
+              onClick={() => photoInputRef.current?.click()}
+              className="h-20 w-20 rounded-xl border-2 border-dashed border-border bg-muted flex flex-col items-center justify-center gap-1 transition-default hover:border-primary/50"
+            >
+              <Camera className="h-6 w-6 text-muted-foreground" />
+              <span className="text-[10px] text-muted-foreground">Add photo</span>
+            </button>
+          )}
+        </div>
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={handlePhotoSelect}
+        />
+      </div>
+
+      {/* Location */}
       <div className="space-y-2">
         <label className="text-sm font-semibold text-foreground">Location</label>
         <LoadingButton variant="outline" loading={locating} onClick={handleLocate}>
           <MapPin className="h-4 w-4" /> {location || "Use GPS Location"}
         </LoadingButton>
-
-        {/* [FIX 3] Manual input with autocomplete */}
         <div className="relative" ref={suggestionsRef}>
           <Input
             placeholder="Or enter address manually"
@@ -202,7 +284,6 @@ export default function BookService() {
             onFocus={() => suggestions.length > 0 && setShowSuggestions(true)}
             autoComplete="off"
           />
-          {/* Suggestion dropdown */}
           {showSuggestions && suggestions.length > 0 && (
             <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-card border border-border rounded-xl shadow-lg overflow-hidden">
               {suggestions.map((s, i) => (
@@ -237,15 +318,10 @@ export default function BookService() {
           {TIME_SLOTS.map((slot) => (
             <button
               key={slot}
-              onClick={() => {
-                setTimeSlot(slot);
-                if (slot === "Urgent") setUrgency("urgent");
-              }}
+              onClick={() => { setTimeSlot(slot); if (slot === "Urgent") setUrgency("urgent"); }}
               className={`rounded-full px-4 py-2 text-xs font-semibold transition-default ${
                 timeSlot === slot
-                  ? slot === "Urgent"
-                    ? "bg-secondary text-secondary-foreground"
-                    : "bg-primary text-primary-foreground"
+                  ? slot === "Urgent" ? "bg-secondary text-secondary-foreground" : "bg-primary text-primary-foreground"
                   : "bg-muted text-muted-foreground hover:bg-muted/80"
               }`}
             >
@@ -265,9 +341,7 @@ export default function BookService() {
               onClick={() => setUrgency(u)}
               className={`flex-1 touch-target rounded-lg py-2.5 text-sm font-semibold capitalize transition-default ${
                 urgency === u
-                  ? u === "urgent"
-                    ? "bg-secondary text-secondary-foreground"
-                    : "bg-primary text-primary-foreground"
+                  ? u === "urgent" ? "bg-secondary text-secondary-foreground" : "bg-primary text-primary-foreground"
                   : "bg-muted text-muted-foreground hover:bg-muted/80"
               }`}
             >
@@ -290,9 +364,7 @@ export default function BookService() {
                 <Checkbox
                   checked={selectedTools.includes(tool)}
                   onCheckedChange={(checked) =>
-                    setSelectedTools((p) =>
-                      checked ? [...p, tool] : p.filter((t) => t !== tool)
-                    )
+                    setSelectedTools((p) => checked ? [...p, tool] : p.filter((t) => t !== tool))
                   }
                 />
                 <span className="text-sm text-foreground">{tool}</span>
@@ -302,21 +374,30 @@ export default function BookService() {
         </div>
       )}
 
-      {/* Price Estimate */}
-      {estimate && (
-        <div className="rounded-xl bg-muted border border-border p-4 flex items-start gap-3">
-          <Info className="h-5 w-5 text-muted-foreground shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-semibold text-foreground">Estimated Price</p>
-            <p className="text-lg font-bold text-foreground">{estimate}</p>
-            <p className="text-xs text-muted-foreground mt-0.5">Final price set by worker after assessment</p>
-          </div>
+      {/* [POLISH 1] Customer Budget — replaces static "Estimated Price" */}
+      <div className="space-y-1.5">
+        <label className="text-sm font-semibold text-foreground">Your Budget</label>
+        <div className="relative">
+          <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+          <Input
+            type="number"
+            placeholder="Enter your budget (e.g. 500)"
+            value={budget}
+            onChange={(e) => setBudget(e.target.value)}
+            className="pl-9"
+            min={0}
+          />
         </div>
-      )}
+        <p className="text-xs text-muted-foreground">Worker will see your budget before accepting the job</p>
+      </div>
 
       {/* Submit */}
-      <LoadingButton loading={submitting} disabled={!canSubmit} onClick={handleSubmit}>
-        Find Available Workers
+      <LoadingButton
+        loading={submitting || uploadingPhotos}
+        disabled={!canSubmit}
+        onClick={handleSubmit}
+      >
+        {uploadingPhotos ? "Uploading photos..." : "Find Available Workers"}
       </LoadingButton>
     </div>
   );

@@ -1,13 +1,13 @@
 // src/pages/worker/WorkerJobDetail.tsx
-// PHASE 6 FIX:
-//   [FIX] workerTools was hardcoded as a static array — tool match check against
-//         job.toolsRequired was meaningless. Now fetches real tools from
-//         useWorkerProfile() so the ✓/✗ check reflects the actual worker inventory.
-// ALL JSX structure, Tailwind classes, layout, action buttons — IDENTICAL to original.
+// POLISH:
+//   [POLISH 5] CountdownRing timer changed from 60s → 300s (5 minutes)
+//   [POLISH 1a] Payment section shows "Customer Budget" instead of "Cash on completion"
+//   [POLISH 1b] Shows customer-uploaded photos if any
+// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useJobDetail, useWorkerProfile, type Job } from "@/hooks/useWorkerApi"; // [FIX] added useWorkerProfile
+import { useJobDetail, useWorkerProfile, type Job } from "@/hooks/useWorkerApi";
 import { useJobStatusPolling, useJobStatusMutation } from "@/hooks/useJobLifecycle";
 import { type JobStatus } from "@/lib/jobStateMachine";
 import { StatusChip } from "@/components/StatusComponents";
@@ -17,7 +17,7 @@ import WorkerJobCompletion from "@/components/WorkerJobCompletion";
 import { Skeleton } from "@/components/ui/skeleton";
 import LoadingButton from "@/components/LoadingButton";
 import {
-  Star, Phone, MapPin, Check, X, MessageCircle, Navigation, ChevronLeft,
+  Star, Phone, MapPin, Check, X, MessageCircle, Navigation, ChevronLeft, ImageIcon,
 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
 
@@ -26,14 +26,13 @@ export default function WorkerJobDetail() {
   const navigate = useNavigate();
   const { data: job, isLoading } = useJobDetail(id || "");
 
-  // [FIX] Fetch real worker profile to get actual tool inventory
   const { data: workerProfile } = useWorkerProfile();
   const workerTools = workerProfile?.tools.map((t) => t.tool_name) ?? [];
 
   const statusMutation = useJobStatusMutation();
 
   const initialStatus: JobStatus = job?.status === "active" ? "accepted" : (job?.status as JobStatus) || "pending";
-  const { data: polledStatus } = useJobStatusPolling(id || "", initialStatus);
+  const { data: polledStatus }   = useJobStatusPolling(id || "", initialStatus);
   const [localStatus, setLocalStatus] = useState<JobStatus | null>(null);
 
   const status: JobStatus = localStatus || polledStatus || initialStatus;
@@ -42,7 +41,7 @@ export default function WorkerJobDetail() {
 
   useEffect(() => {
     if (polledStatus && !localStatus) {
-      // sync only if we haven't locally overridden
+      // sync only if not locally overridden
     }
   }, [polledStatus, localStatus]);
 
@@ -86,6 +85,9 @@ export default function WorkerJobDetail() {
   }
 
   const isLiveTracking = status === "en_route" || status === "in_progress";
+
+  // [POLISH 1b] photos from job
+  const photoUrls: string[] = (job as Job & { photoUrls?: string[] }).photoUrls ?? [];
 
   return (
     <div className="px-4 py-5 space-y-5 animate-fade-in pb-32">
@@ -132,11 +134,33 @@ export default function WorkerJobDetail() {
         </div>
       </div>
 
-      {/* Live Location Map (en_route / in_progress only) */}
+      {/* [POLISH 1b] Customer photos */}
+      {photoUrls.length > 0 && (
+        <div className="space-y-2">
+          <h4 className="text-sm font-bold text-foreground flex items-center gap-2">
+            <ImageIcon className="h-4 w-4 text-muted-foreground" />
+            Photos from Customer
+          </h4>
+          <div className="flex gap-2 flex-wrap">
+            {photoUrls.map((url, i) => (
+              <a
+                key={i}
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="h-24 w-24 rounded-xl overflow-hidden border border-border block"
+              >
+                <img src={url} alt={`Job photo ${i + 1}`} className="h-full w-full object-cover" />
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Live Location Map */}
       {isLiveTracking ? (
         <LiveLocationMap jobId={id!} isTracking={true} address={job.address} />
       ) : (
-        /* Static Map */
         <div className="space-y-2">
           <h4 className="text-sm font-bold text-foreground">Location</h4>
           <div className="relative h-36 rounded-xl bg-muted border border-border flex items-center justify-center">
@@ -151,20 +175,20 @@ export default function WorkerJobDetail() {
         </div>
       )}
 
-      {/* Payment */}
+      {/* [POLISH 1a] Customer Budget — replaces "Cash on completion" */}
       <div className="rounded-xl border border-border bg-card p-4 text-center">
         <p className="text-3xl font-bold text-foreground">₹{job.payment}</p>
-        <p className="text-sm text-muted-foreground mt-1">Cash on completion</p>
+        <p className="text-sm text-muted-foreground mt-1">
+          {job.payment > 0 ? "Customer's budget" : "Price to be negotiated"}
+        </p>
       </div>
 
-      {/* Tools Required — [FIX] real workerTools from useWorkerProfile() */}
+      {/* Tools Required */}
       <div className="space-y-2">
         <h4 className="text-sm font-bold text-foreground">Tools Required</h4>
         <div className="space-y-2">
           {job.toolsRequired.map((tool) => {
-            const hasTool = workerTools
-              .map((t) => t.toLowerCase())
-              .includes(tool.toLowerCase());
+            const hasTool = workerTools.map((t) => t.toLowerCase()).includes(tool.toLowerCase());
             return (
               <div key={tool} className="flex items-center gap-3 rounded-lg border border-border bg-card px-3 py-2.5">
                 <div className={`h-5 w-5 rounded-full flex items-center justify-center ${
@@ -184,7 +208,8 @@ export default function WorkerJobDetail() {
         {status === "pending" && (
           <>
             <div className="flex items-center justify-center gap-3 mb-1">
-              <CountdownRing seconds={60} onComplete={handleCountdownComplete} />
+              {/* [POLISH 5] Timer changed from 60s → 300s (5 minutes) */}
+              <CountdownRing seconds={300} total={300} onComplete={handleCountdownComplete} />
             </div>
             <div className="flex gap-3">
               <LoadingButton
@@ -206,18 +231,12 @@ export default function WorkerJobDetail() {
           </>
         )}
         {status === "accepted" && (
-          <LoadingButton
-            loading={statusMutation.isPending}
-            onClick={() => handleStatusUpdate("en_route")}
-          >
+          <LoadingButton loading={statusMutation.isPending} onClick={() => handleStatusUpdate("en_route")}>
             Mark En Route
           </LoadingButton>
         )}
         {status === "en_route" && (
-          <LoadingButton
-            loading={statusMutation.isPending}
-            onClick={() => handleStatusUpdate("in_progress")}
-          >
+          <LoadingButton loading={statusMutation.isPending} onClick={() => handleStatusUpdate("in_progress")}>
             Job Started
           </LoadingButton>
         )}
