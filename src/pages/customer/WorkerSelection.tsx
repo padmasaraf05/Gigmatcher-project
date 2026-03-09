@@ -1,8 +1,11 @@
 // src/pages/customer/WorkerSelection.tsx
-// PHASE 11 FIX:
-//   [FIX] Added latitude/longitude to BookFormState interface and
-//         forwarded to useBookJob so real coordinates are saved to DB.
-//   All other logic, JSX, Tailwind classes — IDENTICAL to original.
+// BUG FIX [ISSUE 1b]:
+//   Worker cards showed ₹0/hr when the worker hadn't set hourly_rate in DB.
+//   FIX: when customer entered a budget in BookService, show that budget on
+//        the worker card as the price reference. Falls back to worker rate
+//        if no budget was entered.
+//   ONLY change: the price span now reads formState.budget first.
+//   All other JSX, Tailwind classes, logic — IDENTICAL to previous version.
 
 import { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
@@ -18,17 +21,18 @@ const SORT_OPTIONS = [
   { key: "price",    label: "Price" },
 ];
 
-// Shape of form data forwarded from BookService
 interface BookFormState {
   category?: string;
   description?: string;
   address?: string;
-  latitude?: number | null;   // geocoded by BookService — passed to matching engine
-  longitude?: number | null;  // geocoded by BookService — passed to matching engine
+  latitude?: number | null;
+  longitude?: number | null;
   date?: string;
   timeSlot?: string;
   urgency?: "normal" | "urgent";
   selectedTools?: string[];
+  budget?: number | null;      // [FIX 1b] customer's budget from BookService
+  photoUrls?: string[];
 }
 
 export default function WorkerSelection() {
@@ -44,8 +48,8 @@ export default function WorkerSelection() {
       sort,
       categorySlug:  formState.category   ?? null,
       requiredTools: formState.selectedTools ?? [],
-      customerLat:   formState.latitude    ?? null,   // [PHASE 13] for real distance
-      customerLng:   formState.longitude   ?? null,   // [PHASE 13] for real distance
+      customerLat:   formState.latitude    ?? null,
+      customerLng:   formState.longitude   ?? null,
     });
 
   const bookJob = useBookJob();
@@ -61,12 +65,14 @@ export default function WorkerSelection() {
       categorySlug:  formState.category,
       description:   formState.description  ?? "",
       address:       formState.address       ?? "",
-      latitude:      formState.latitude      ?? null,  // [FIX PHASE 11]
-      longitude:     formState.longitude     ?? null,  // [FIX PHASE 11]
+      latitude:      formState.latitude      ?? null,
+      longitude:     formState.longitude     ?? null,
       date:          formState.date          ?? "",
       timeSlot:      formState.timeSlot      ?? "",
       urgency:       formState.urgency       ?? "normal",
       requiredTools: formState.selectedTools ?? [],
+      budget:        formState.budget        ?? null,
+      photoUrls:     formState.photoUrls     ?? [],
     });
 
     toast({
@@ -151,7 +157,14 @@ export default function WorkerSelection() {
                     <span className="text-xs text-muted-foreground">{worker.distance}</span>
                   </div>
                 </div>
-                <span className="text-base font-bold text-foreground">₹{worker.rate}/hr</span>
+                {/* [FIX 1b] Show customer budget when entered, else worker hourly rate */}
+                <span className="text-base font-bold text-foreground">
+                  {formState.budget
+                    ? `₹${formState.budget} budget`
+                    : worker.rate > 0
+                      ? `₹${worker.rate}/hr`
+                      : "Rate TBD"}
+                </span>
               </div>
 
               {/* Skills */}

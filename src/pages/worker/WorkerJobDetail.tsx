@@ -1,9 +1,15 @@
 // src/pages/worker/WorkerJobDetail.tsx
-// POLISH:
-//   [POLISH 5] CountdownRing timer changed from 60s → 300s (5 minutes)
-//   [POLISH 1a] Payment section shows "Customer Budget" instead of "Cash on completion"
+// FIX [NEW-ISSUE-3]: Phone button now initiates a real call.
+//   Changes:
+//     - Phone button onClick → window.location.href = `tel:${phone}`
+//     - Uses job.phone — already mapped by mapJobRow from profiles!customer_id(phone)
+//       in JOB_SELECT. No type extension or schema change needed.
+//   ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
+//
+// Previous polish notes preserved:
+//   [POLISH 5] CountdownRing timer: 60s → 300s (5 minutes)
+//   [POLISH 1a] Payment section shows "Customer Budget"
 //   [POLISH 1b] Shows customer-uploaded photos if any
-// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -20,6 +26,8 @@ import {
   Star, Phone, MapPin, Check, X, MessageCircle, Navigation, ChevronLeft, ImageIcon,
 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
+
+// job.phone is already on the Job type — no extension needed
 
 export default function WorkerJobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -63,6 +71,19 @@ export default function WorkerJobDetail() {
     await statusMutation.mutateAsync({ jobId: id!, status: "declined" });
     setLocalStatus("declined");
     navigate("/worker/jobs", { replace: true });
+  };
+
+  // [FIX NEW-ISSUE-3] job.phone is already populated by mapJobRow → profiles!customer_id(phone)
+  const handleCallCustomer = () => {
+    const phone = job?.phone;
+    if (phone) {
+      window.location.href = `tel:${phone}`;
+    } else {
+      toast({
+        title: "Phone number unavailable",
+        description: "Customer's phone number is not on record.",
+      });
+    }
   };
 
   if (isLoading) {
@@ -117,7 +138,11 @@ export default function WorkerJobDetail() {
             <span>{job.customerRating}</span>
           </div>
         </div>
-        <button className="touch-target h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center transition-default hover:bg-primary/20">
+        {/* [FIX NEW-ISSUE-3] onClick wired to handleCallCustomer */}
+        <button
+          onClick={handleCallCustomer}
+          className="touch-target h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center transition-default hover:bg-primary/20"
+        >
           <Phone className="h-5 w-5 text-primary" />
         </button>
       </div>

@@ -2,31 +2,55 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>GigMatcher — Find Gig Workers Near You</title>
-    <meta name="description" content="AI-powered gig marketplace for India&#39;s Tier-2/3 cities. Find workers or find work instantly.">
-    <meta name="author" content="GigMatcher" />
+
+    <!--
+      viewport-fit=cover: lets the app extend into iPhone notch/home-bar area
+      so the UI fills the full screen like a native app.
+    -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <!-- ─── PWA: Theme colour (Android chrome bar + task switcher) ──────── -->
     <meta name="theme-color" content="#2563EB" />
-    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- ─── iOS PWA meta tags ───────────────────────────────────────────── -->
+    <!--
+      apple-mobile-web-app-capable: hides Safari UI when launched from home screen.
+      Without this, iOS shows the full browser chrome even in standalone mode.
+    -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!--
+      default = white status bar (readable on our blue header).
+      Options: "default" | "black" | "black-translucent"
+    -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- Name shown below the icon on the home screen -->
+    <meta name="apple-mobile-web-app-title" content="GigMatcher" />
+    <!-- Icon iOS uses when adding to home screen (Safari ignores manifest icons) -->
     <link rel="apple-touch-icon" href="/icons/icon-192.png" />
 
-    
-    
-    <meta property="og:type" content="website" />
+    <!-- ─── Android / Generic ───────────────────────────────────────────── -->
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="application-name" content="GigMatcher" />
 
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <meta property="og:title" content="GigMatcher — Find Gig Workers Near You">
-  <meta name="twitter:title" content="GigMatcher — Find Gig Workers Near You">
-  <meta property="og:description" content="AI-powered gig marketplace for India&#39;s Tier-2/3 cities. Find workers or find work instantly.">
-  <meta name="twitter:description" content="AI-powered gig marketplace for India&#39;s Tier-2/3 cities. Find workers or find work instantly.">
-  <link rel="icon" type="image/png" href="/icons/icon-192.png">
-  <meta property="og:image" content="https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/1532a020-e18b-4770-903a-d519d11c2b4f/id-preview-bd95e6a9--e1ec83cd-4edf-40fa-9552-a94624d06aa9.lovable.app-1771865042505.png">
-  <meta name="twitter:image" content="https://pub-bb2e103a32db4e198524a2e9ed8f35b4.r2.dev/1532a020-e18b-4770-903a-d519d11c2b4f/id-preview-bd95e6a9--e1ec83cd-4edf-40fa-9552-a94624d06aa9.lovable.app-1771865042505.png">
-  <meta name="twitter:card" content="summary_large_image">
-</head>
+    <!-- ─── Favicon ─────────────────────────────────────────────────────── -->
+    <link rel="icon" type="image/png" sizes="96x96" href="/icons/icon-96.png" />
+    <link rel="icon" type="image/png" sizes="72x72" href="/icons/icon-72.png" />
 
+    <!-- ─── SEO ──────────────────────────────────────────────────────────── -->
+    <title>GigMatcher — Find Gig Workers Near You</title>
+    <meta
+      name="description"
+      content="Connect with skilled gig workers near you — plumbers, electricians, carpenters and more. Instant booking, verified workers."
+    />
+
+    <!--
+      NOTE: vite-plugin-pwa (registerType: "autoUpdate") automatically:
+        - Injects <link rel="manifest" href="/manifest.webmanifest" /> at build time
+        - Registers and auto-updates the Workbox service worker
+        - Handles the SW registration script
+      Do NOT add those manually here — it would create duplicates.
+    -->
+  </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

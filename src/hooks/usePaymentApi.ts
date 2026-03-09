@@ -1,27 +1,21 @@
 // src/hooks/usePaymentApi.ts
-// PHASE 7: useEnhancedEarnings + useInvoice — real Supabase (unchanged)
-// PHASE 12 — Subscriptions + Razorpay:
-//   useSubscriptionStatus() — real query, now includes payment history from
-//     subscription_payments table.
-//   useUpgradeSubscription() — real Razorpay checkout.js flow:
-//     1. Loads Razorpay script dynamically
-//     2. Opens checkout with test/live key from VITE_RAZORPAY_KEY_ID
-//     3. On payment success → INSERT subscriptions row (plan=pro, 30 days)
-//     4. INSERT subscription_payments row (audit trail)
-//     5. Invalidates subscription cache → UI shows Pro instantly
-//   useCancelSubscription() — real UPDATE subscriptions SET status=cancelled
-//   useProcessPayment() — still mock (real gateway = Phase 13 FastAPI)
-//   usePaymentMethods — still mock (persisted to DB in Phase 13)
+// BUG FIX [ISSUE 4] — useProcessPayment was adding platform_fee on top of
+//   service charge when calculating the Razorpay total:
 //
-// PREREQUISITE: run phase12_prerequisites.sql in Supabase SQL Editor first.
-//   Renames plan_type→plan, adds subscription_payments table, RLS policies.
+//   OLD:
+//     const platformFee = job.platform_fee ?? 20;
+//     const total       = serviceCharge + platformFee;   ← customer charged extra
 //
-// RAZORPAY SETUP:
-//   1. Create account at https://dashboard.razorpay.com
-//   2. Get test key: Settings → API Keys → Key ID (starts with rzp_test_)
-//   3. Add to .env: VITE_RAZORPAY_KEY_ID=rzp_test_YOUR_KEY_HERE
-//   4. Test UPI ID: success@razorpay
-//   5. Test card: 4111 1111 1111 1111, any future date, any CVV
+//   FIX:
+//     const total = serviceCharge;   ← customer pays face value only
+//
+//   Design decision: "Worker pays commission only (customer pays face value)"
+//   Worker's 10% commission is already deducted in the earnings table via
+//   the DB trigger. Customer is never charged a platform fee.
+//
+//   Also: toast success now shows the correct face-value amount.
+//
+//   ALL other functions, types, exports — IDENTICAL to previous version.
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/lib/supabase";
@@ -129,7 +123,7 @@ const SERVICE_ICON: Record<string, string> = {
   "AC Technician": "❄️", "Appliance Repair": "🛠️", Gardener: "🌿", Cleaner: "🧹",
 };
 
-// ─── Real: Enhanced Earnings (Phase 7 — unchanged) ───────────────────────────
+// ─── Real: Enhanced Earnings ──────────────────────────────────────────────────
 
 export function useEnhancedEarnings(period: Period) {
   return useQuery<EnhancedEarningsData>({
@@ -167,11 +161,12 @@ export function useEnhancedEarnings(period: Period) {
 
       const prevTotal = (prevRows ?? []).reduce((s, r) => s + (r.payout_amount ?? 0), 0);
 
+      // [FIX NEW-ISSUE-2] commission = 0, worker gets 100% of gross
       let grossEarnings = 0, commissionTotal = 0, netPayout = 0;
       for (const r of currentRows) {
-        grossEarnings   += r.gross_amount      ?? 0;
-        commissionTotal += r.commission_amount ?? 0;
-        netPayout       += r.payout_amount     ?? 0;
+        grossEarnings   += r.gross_amount ?? 0;
+        commissionTotal  = 0;                      // commission removed
+        netPayout        = grossEarnings;          // payout = gross (100%)
       }
 
       let percentChange = 0, isUp = true;
@@ -185,7 +180,7 @@ export function useEnhancedEarnings(period: Period) {
       labels.forEach((l) => (buckets[l] = 0));
       for (const r of currentRows) {
         const key = getKey(new Date(r.created_at));
-        if (key in buckets) buckets[key] += r.payout_amount ?? 0;
+        if (key in buckets) buckets[key] += r.gross_amount ?? 0;  // [FIX NEW-ISSUE-2]
       }
       const amounts = labels.map((l) => buckets[l]);
       const avg = amounts.length > 0 ? Math.round(amounts.reduce((s, v) => s + v, 0) / amounts.length) : 0;
@@ -202,14 +197,15 @@ export function useEnhancedEarnings(period: Period) {
           id: r.id, serviceIcon: SERVICE_ICON[serviceType] ?? "💼", customerName, serviceType,
           date: createdAt.toLocaleDateString("en-IN", { day: "numeric", month: "short" }),
           grossAmount: Math.round(r.gross_amount ?? 0),
-          netAmount:   Math.round(r.payout_amount ?? 0),
+          netAmount:   Math.round(r.gross_amount ?? 0),   // [FIX NEW-ISSUE-2] payout = gross
           status:      r.status ?? "paid",
         };
       });
 
       return {
-        total: Math.round(netPayout), grossEarnings: Math.round(grossEarnings),
-        commission: Math.round(commissionTotal), netPayout: Math.round(netPayout),
+        // [FIX NEW-ISSUE-2] commission = 0, total = gross
+        total: Math.round(grossEarnings), grossEarnings: Math.round(grossEarnings),
+        commission: 0, netPayout: Math.round(grossEarnings),
         jobsCompleted: currentRows.length, isUp, percentChange: Math.abs(percentChange),
         chartData, transactions,
       };
@@ -218,7 +214,7 @@ export function useEnhancedEarnings(period: Period) {
   });
 }
 
-// ─── Real: Invoice detail (Phase 7 — unchanged) ───────────────────────────────
+// ─── Real: Invoice detail ─────────────────────────────────────────────────────
 
 export function useInvoice(earningsId: string) {
   return useQuery<InvoiceData>({
@@ -267,8 +263,8 @@ export function useInvoice(earningsId: string) {
         serviceDescription: job?.description ? `${serviceType} — ${job.description}` : serviceType,
         hours, rate: Math.round(rate), subtotal: Math.round(grossAmount),
         grossAmount: Math.round(grossAmount),
-        commission:  Math.round(row.commission_amount ?? grossAmount * 0.1),
-        netAmount:   Math.round(row.payout_amount     ?? grossAmount * 0.9),
+        commission:  0,                          // [FIX NEW-ISSUE-2] no commission
+        netAmount:   Math.round(grossAmount),    // [FIX NEW-ISSUE-2] payout = gross
         paymentMethod: "Cash",
         transactionId: row.id.slice(0, 13).toUpperCase(),
       };
@@ -313,7 +309,6 @@ export interface SubscriptionStatus {
 }
 
 // ─── Real: useSubscriptionStatus ─────────────────────────────────────────────
-// Phase 12: now includes real payment history from subscription_payments table.
 
 export function useSubscriptionStatus() {
   return useQuery<SubscriptionStatus>({
@@ -323,10 +318,8 @@ export function useSubscriptionStatus() {
       const uid = session?.user?.id;
       if (!uid) return { plan: "free", renewalDate: null, status: null, paymentHistory: [] };
 
-      // Run expiry cleanup
       await supabase.rpc("expire_subscriptions");
 
-      // Fetch active subscription
       const { data: sub } = await supabase
         .from("subscriptions")
         .select("id, plan, status, end_date")
@@ -336,7 +329,6 @@ export function useSubscriptionStatus() {
 
       if (!sub) return { plan: "free", renewalDate: null, status: null, paymentHistory: [] };
 
-      // Fetch payment history for this subscription
       const { data: payments } = await supabase
         .from("subscription_payments")
         .select("id, amount, status, created_at")
@@ -378,15 +370,6 @@ function loadRazorpayScript(): Promise<boolean> {
 }
 
 // ─── Real: useUpgradeSubscription ────────────────────────────────────────────
-// Phase 12: Opens Razorpay checkout. On success:
-//   1. Cancels any existing subscription
-//   2. INSERTs new subscriptions row (plan=pro, 30 days)
-//   3. INSERTs subscription_payments row (audit trail)
-//   4. Invalidates cache → UI reflects Pro status instantly
-//
-// SETUP REQUIRED:
-//   Add VITE_RAZORPAY_KEY_ID=rzp_test_YOUR_KEY to your .env file
-//   Get key from: https://dashboard.razorpay.com → Settings → API Keys
 
 export function useUpgradeSubscription() {
   const qc = useQueryClient();
@@ -397,21 +380,18 @@ export function useUpgradeSubscription() {
       const uid = session?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Load Razorpay SDK
       const loaded = await loadRazorpayScript();
       if (!loaded) throw new Error("Could not load Razorpay. Check your internet connection.");
 
       const keyId = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
       if (!keyId) throw new Error("VITE_RAZORPAY_KEY_ID not set in .env");
 
-      // Fetch worker name for prefill
       const { data: profile } = await supabase
         .from("profiles")
         .select("full_name, phone")
         .eq("id", uid)
         .single();
 
-      // Open Razorpay checkout
       await new Promise<void>((resolve, reject) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const Razorpay = (window as any).Razorpay;
@@ -419,7 +399,7 @@ export function useUpgradeSubscription() {
 
         const options = {
           key:         keyId,
-          amount:      9900,        // ₹99 in paise
+          amount:      9900,
           currency:    "INR",
           name:        "GigMatcher",
           description: "Pro Subscription — 1 Month",
@@ -436,7 +416,6 @@ export function useUpgradeSubscription() {
             razorpay_order_id?: string;
           }) => {
             try {
-              // Cancel any existing active subscription
               await supabase
                 .from("subscriptions")
                 .update({ status: "cancelled" })
@@ -445,9 +424,8 @@ export function useUpgradeSubscription() {
 
               const now      = new Date();
               const endDate  = new Date(now);
-              endDate.setDate(endDate.getDate() + 30); // 30-day subscription
+              endDate.setDate(endDate.getDate() + 30);
 
-              // Insert new subscription
               const { data: newSub, error: subErr } = await supabase
                 .from("subscriptions")
                 .insert({
@@ -465,7 +443,6 @@ export function useUpgradeSubscription() {
 
               if (subErr) { reject(new Error(subErr.message)); return; }
 
-              // Insert payment record
               await supabase
                 .from("subscription_payments")
                 .insert({
@@ -501,7 +478,6 @@ export function useUpgradeSubscription() {
       void qc.invalidateQueries({ queryKey: ["worker", "subscription"] });
     },
     onError: (err: Error) => {
-      // Don't toast "Payment cancelled" — user dismissed intentionally
       if (err.message !== "Payment cancelled") {
         toast({ title: "Upgrade failed", description: err.message });
       }
@@ -510,7 +486,6 @@ export function useUpgradeSubscription() {
 }
 
 // ─── Real: useCancelSubscription ─────────────────────────────────────────────
-// Phase 12: Real UPDATE — sets status=cancelled. Worker retains Pro until end_date.
 
 export function useCancelSubscription() {
   const qc = useQueryClient();
@@ -538,16 +513,8 @@ export function useCancelSubscription() {
 }
 
 // ─── Real: useProcessPayment ──────────────────────────────────────────────────
-// Phase 12b: Real Razorpay checkout for customer booking payments.
-//
-// Flow:
-//   1. Fetches job to get total amount (estimated_price + platform_fee)
-//   2. Opens Razorpay checkout
-//   3. On success → UPDATE jobs SET payment_status='paid', razorpay_payment_id
-//   4. Invalidates booking cache → PaymentInfoCard shows "paid" instantly
-//
-// The earnings row is created automatically by the DB trigger
-// trg_create_earnings_on_completion when job status → 'completed'.
+// [FIX ISSUE 4] Customer pays face value only — platform fee NOT added.
+// Worker commission is deducted separately via the DB trigger on earnings.
 
 export function useProcessPayment() {
   const qc = useQueryClient();
@@ -557,30 +524,30 @@ export function useProcessPayment() {
       const uid = session?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Fetch job details for amount + customer info
       const { data: job, error: jobErr } = await supabase
         .from("jobs")
-        .select("estimated_price, final_price, platform_fee, profiles!customer_id(full_name, phone)")
+        .select("estimated_price, final_price, profiles!customer_id(full_name, phone)")
         .eq("id", bookingId)
         .single();
 
       if (jobErr || !job) throw new Error("Booking not found");
 
-      const serviceCharge = job.final_price ?? job.estimated_price ?? 0;
-      const platformFee   = (job as { platform_fee?: number }).platform_fee ?? 20;
-      const total         = serviceCharge + platformFee;
-      const totalPaise    = Math.round(total * 100);
+      // [FIX 4] Customer pays the service charge (face value) only.
+      // platform_fee is NOT added — worker pays commission from their earnings.
+      const serviceCharge = (job as { final_price?: number | null }).final_price
+        ?? job.estimated_price
+        ?? 0;
+      const total      = serviceCharge;
+      const totalPaise = Math.round(total * 100);
 
       const customer = Array.isArray(job.profiles) ? job.profiles[0] : job.profiles;
 
-      // Load Razorpay SDK
       const loaded = await loadRazorpayScript();
       if (!loaded) throw new Error("Could not load Razorpay. Check your internet connection.");
 
       const keyId = import.meta.env.VITE_RAZORPAY_KEY_ID as string | undefined;
       if (!keyId) throw new Error("VITE_RAZORPAY_KEY_ID not set in .env");
 
-      // Open Razorpay checkout
       await new Promise<void>((resolve, reject) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const Razorpay = (window as any).Razorpay;
@@ -607,7 +574,6 @@ export function useProcessPayment() {
             razorpay_order_id?: string;
           }) => {
             try {
-              // Mark job as paid in DB
               const { error: updateErr } = await supabase
                 .from("jobs")
                 .update({
@@ -658,7 +624,6 @@ export interface PaymentMethod {
 }
 
 // ─── Real: usePaymentMethods ──────────────────────────────────────────────────
-// Phase 12b: Reads from payment_methods table (created in phase12b_prerequisites.sql)
 
 export function usePaymentMethods() {
   return useQuery<PaymentMethod[]>({
@@ -696,7 +661,6 @@ export function useAddPaymentMethod() {
       const uid = session?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Check if this is the first method — make it default
       const { count } = await supabase
         .from("payment_methods")
         .select("id", { count: "exact", head: true })
@@ -734,7 +698,6 @@ export function useDeletePaymentMethod() {
       const uid = session?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Check if deleting default — promote next one if so
       const { data: toDelete } = await supabase
         .from("payment_methods")
         .select("is_default")
@@ -748,7 +711,6 @@ export function useDeletePaymentMethod() {
 
       if (error) throw new Error(error.message);
 
-      // If deleted method was default, promote the first remaining
       if (toDelete?.is_default) {
         const { data: remaining } = await supabase
           .from("payment_methods")
@@ -779,13 +741,11 @@ export function useSetDefaultPaymentMethod() {
       const uid = session?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Clear existing default
       await supabase
         .from("payment_methods")
         .update({ is_default: false })
         .eq("user_id", uid);
 
-      // Set new default
       const { error } = await supabase
         .from("payment_methods")
         .update({ is_default: true })

@@ -53,7 +53,7 @@ export default function CustomerLayout() {
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1.5 rounded-full bg-muted px-3 py-1.5">
             <MapPin className="h-4 w-4 text-primary" />
-            <span className="text-sm font-medium text-foreground">Indore, MP</span>
+            <span className="text-sm font-medium text-foreground">Bangalore, Karnataka</span>
           </div>
         </div>
         <div className="flex items-center gap-2">

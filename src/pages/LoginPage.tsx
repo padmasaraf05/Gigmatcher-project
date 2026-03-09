@@ -26,9 +26,7 @@ export default function LoginPage() {
   return (
     <div className="app-shell flex flex-col px-6 py-12">
       <div className="animate-fade-in-up flex flex-col items-center mb-10">
-        <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary">
-          <Briefcase className="h-8 w-8 text-primary-foreground" />
-        </div>
+        <img src="/icons/icon-192.png" alt="GigMatcher logo" className="mb-4 h-20 w-20 rounded-2xl shadow-lg" />
         <h1 className="text-2xl font-bold text-foreground">Welcome back</h1>
         <p className="text-muted-foreground mt-1">Login to your GigMatcher account</p>
       </div>

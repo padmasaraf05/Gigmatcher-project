@@ -1,22 +1,36 @@
+// src/pages/NotificationsScreen.tsx
+// FIX [NEW-ISSUE-1]: Added "message" notification type support.
+//   Changes:
+//     - Added { key: "message", label: "Messages" } to FILTERS array
+//     - Added message: { icon: MessageCircle, ... } to TYPE_ICON map
+//     - Added MessageCircle to lucide-react imports
+//   Message notifications appear when the backend inserts a row with
+//   type="message" into the notifications table (see SQL in NEW_ISSUES.sql).
+//   All other JSX structure, Tailwind classes, layout — IDENTICAL to original.
+
 import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useNotifications, useMarkAllRead, useMarkRead, useDismissNotification, useClearAll, AppNotification } from "@/hooks/useNotifications";
 import { EmptyState } from "@/components/shared";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bell, Briefcase, DollarSign, BellRing, Check, Trash2, ArrowLeft, MoreVertical } from "lucide-react";
+import { Bell, Briefcase, DollarSign, BellRing, Check, Trash2, ArrowLeft, MoreVertical, MessageCircle } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 const FILTERS = [
-  { key: "all", label: "All" },
-  { key: "job", label: "Jobs" },
+  { key: "all",     label: "All"      },
+  { key: "job",     label: "Jobs"     },
   { key: "payment", label: "Payments" },
-  { key: "system", label: "System" },
+  // [FIX NEW-ISSUE-1] Message notifications filter
+  { key: "message", label: "Messages" },
+  { key: "system",  label: "System"   },
 ];
 
 const TYPE_ICON: Record<string, { icon: typeof Bell; bg: string; color: string }> = {
-  job: { icon: Briefcase, bg: "bg-primary/10", color: "text-primary" },
-  payment: { icon: DollarSign, bg: "bg-accent/10", color: "text-accent" },
-  system: { icon: BellRing, bg: "bg-secondary/10", color: "text-secondary" },
+  job:     { icon: Briefcase,      bg: "bg-primary/10",   color: "text-primary"   },
+  payment: { icon: DollarSign,     bg: "bg-accent/10",    color: "text-accent"    },
+  // [FIX NEW-ISSUE-1] Message notification icon
+  message: { icon: MessageCircle,  bg: "bg-blue-500/10",  color: "text-blue-500"  },
+  system:  { icon: BellRing,       bg: "bg-secondary/10", color: "text-secondary" },
 };
 
 export default function NotificationsScreen() {

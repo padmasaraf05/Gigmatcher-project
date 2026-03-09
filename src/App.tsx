@@ -1,3 +1,9 @@
+// src/App.tsx
+// FIX [NEW-ISSUE-1]: Added bare `/messages` route above `/messages/:id`
+//   so the Messages menu item (which navigates to /messages with no ID)
+//   renders MessagesScreen in conversation-list mode instead of 404.
+//   ONE LINE ADDED — all other routes, providers, and structure IDENTICAL.
+
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -111,6 +117,8 @@ const App = () => (
             } />
 
             {/* Shared Routes */}
+            {/* [FIX NEW-ISSUE-1] /messages (no ID) → conversation list mode in MessagesScreen */}
+            <Route path="/messages" element={<MessagesScreen />} />
             <Route path="/messages/:id" element={<MessagesScreen />} />
             <Route path="/rate/:jobId" element={<JobRatingScreen />} />
             <Route path="/notifications" element={<NotificationsScreen />} />

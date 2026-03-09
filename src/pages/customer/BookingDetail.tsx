@@ -1,9 +1,15 @@
 // src/pages/customer/BookingDetail.tsx
-// POLISH-2 FIX [PHOTOS]:
-//   Added photo gallery section under Job Details to display customer-uploaded
-//   photos (booking.photoUrls). useBookingDetail already fetches photo_urls from
-//   DB and maps them to photoUrls — this file was the only missing piece.
-// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to previous version.
+// FIX [NEW-ISSUE-3]: Phone button now initiates a real call.
+//   Changes:
+//     - Added handleCallWorker() — window.location.href = `tel:${booking.workerPhone}`
+//     - Phone button onClick wired to handleCallWorker
+//     - booking.workerPhone is already populated by useBookingDetail via
+//       profiles!worker_id(phone) in useCustomerApi.ts — no hook changes needed.
+//   ALL other JSX structure, Tailwind classes, layout — IDENTICAL to previous version.
+//
+// Previous fix notes preserved:
+//   [POLISH-2] photo gallery + lightbox
+//   [FIX prev] Google Maps directions URL
 
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -30,7 +36,6 @@ export default function BookingDetail() {
   const [showCancel, setShowCancel]       = useState(false);
   const [rating, setRating]               = useState(0);
   const [comment, setComment]             = useState("");
-  // [POLISH-2 FIX] lightbox state for full-screen photo view
   const [lightboxUrl, setLightboxUrl]     = useState<string | null>(null);
 
   if (isLoading) {
@@ -50,7 +55,6 @@ export default function BookingDetail() {
 
   const isLiveTracking = booking.status === "en_route" || booking.status === "in_progress";
 
-  // [FIX from previous session] Build Google Maps directions URL
   const handleGetDirections = () => {
     let url: string;
     if (booking.latitude && booking.longitude) {
@@ -59,6 +63,20 @@ export default function BookingDetail() {
       url = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(booking.address)}`;
     }
     window.open(url, "_blank");
+  };
+
+  // [FIX NEW-ISSUE-3] Initiate call to worker using booking.workerPhone
+  // booking.workerPhone is populated by useBookingDetail →
+  //   profiles!worker_id(phone) in useCustomerApi.ts
+  const handleCallWorker = () => {
+    if (booking.workerPhone) {
+      window.location.href = `tel:${booking.workerPhone}`;
+    } else {
+      toast({
+        title: "Phone number unavailable",
+        description: "Worker's phone number is not on record.",
+      });
+    }
   };
 
   const handleCancel = async () => {
@@ -74,7 +92,6 @@ export default function BookingDetail() {
     toast({ title: "Review submitted! ⭐", description: "Thanks for your feedback" });
   };
 
-  // [POLISH-2 FIX] photos uploaded by customer when booking
   const photoUrls: string[] = booking.photoUrls ?? [];
 
   return (
@@ -100,7 +117,11 @@ export default function BookingDetail() {
           </div>
         </div>
         <div className="flex gap-2">
-          <button className="touch-target h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center transition-default hover:bg-primary/20">
+          {/* [FIX NEW-ISSUE-3] onClick wired to handleCallWorker */}
+          <button
+            onClick={handleCallWorker}
+            className="touch-target h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center transition-default hover:bg-primary/20"
+          >
             <Phone className="h-5 w-5 text-primary" />
           </button>
           <button
@@ -128,7 +149,7 @@ export default function BookingDetail() {
         </div>
       </div>
 
-      {/* [POLISH-2 FIX] Customer-uploaded photos gallery */}
+      {/* Customer-uploaded photos gallery */}
       {photoUrls.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center gap-2">
@@ -154,7 +175,7 @@ export default function BookingDetail() {
         </div>
       )}
 
-      {/* Map — live for en_route/in_progress, static otherwise */}
+      {/* Map */}
       {isLiveTracking ? (
         <LiveLocationMap jobId={id!} isTracking={true} address={booking.address} />
       ) : (
@@ -244,7 +265,7 @@ export default function BookingDetail() {
         </>
       )}
 
-      {/* [POLISH-2 FIX] Full-screen photo lightbox */}
+      {/* Full-screen photo lightbox */}
       {lightboxUrl && (
         <>
           <div

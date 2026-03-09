@@ -1,31 +1,144 @@
+// src/pages/MessagesScreen.tsx
+// BUG FIX [ISSUE 3] — Messages menu item navigated to /messages (no job ID).
+//   MessagesScreen expected useParams id — got undefined → blank / broken screen.
+//
+//   FIX: When no id param is present (i.e. user tapped "Messages" in menu),
+//        show a conversations inbox: all jobs where the current user is
+//        customer or worker that have at least one message, ordered by
+//        most recent message. Tapping a conversation opens the chat.
+//
+//        When id IS present (navigated from BookingDetail chat button or
+//        notification), the existing full chat view renders — UNCHANGED.
+//
+//   Chat view JSX, Tailwind classes, edit/delete logic — ALL IDENTICAL.
+//   Only addition: conversation list branch at the top of the render.
+
 import { useState, useRef, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useMessages, useSendMessage, useEditMessage, useDeleteMessage } from "@/hooks/useJobLifecycle";
 import { useAuth } from "@/context/AuthContext";
+import { supabase } from "@/lib/supabase";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Send, ChevronLeft, WifiOff, MessageCircle, Pencil, Trash2, X, Check } from "lucide-react";
 
+// ─── Conversation list item shape ────────────────────────────────────────────
+interface Conversation {
+  jobId: string;
+  serviceType: string;
+  otherName: string;
+  lastMessage: string;
+  lastTime: string;
+  status: string;
+}
+
+// ─── Conversations inbox query ────────────────────────────────────────────────
+function useConversations(userId: string | undefined, role: string | undefined) {
+  return useQuery<Conversation[]>({
+    queryKey: ["conversations", userId],
+    enabled: !!userId,
+    queryFn: async (): Promise<Conversation[]> => {
+      if (!userId) return [];
+
+      // Fetch jobs where user is customer or worker, that have messages
+      const { data: jobs, error } = await supabase
+        .from("jobs")
+        .select(`
+          id, status, customer_id, worker_id,
+          service_categories ( name ),
+          customer:profiles!customer_id ( full_name ),
+          worker:profiles!worker_id ( full_name )
+        `)
+        .or(`customer_id.eq.${userId},worker_id.eq.${userId}`)
+        .not("status", "eq", "pending")
+        .order("created_at", { ascending: false });
+
+      if (error || !jobs?.length) return [];
+
+      const jobIds = jobs.map((j) => j.id);
+
+      // Get latest message per job
+      const { data: messages } = await supabase
+        .from("messages")
+        .select("job_id, content, created_at")
+        .in("job_id", jobIds)
+        .order("created_at", { ascending: false });
+
+      // Build one entry per job that has at least one message
+      const seen = new Set<string>();
+      const conversations: Conversation[] = [];
+
+      for (const msg of messages ?? []) {
+        if (seen.has(msg.job_id)) continue;
+        seen.add(msg.job_id);
+
+        const job = jobs.find((j) => j.id === msg.job_id);
+        if (!job) continue;
+
+        const cat = Array.isArray(job.service_categories) ? job.service_categories[0] : job.service_categories;
+        const serviceType = (cat as { name?: string } | null)?.name ?? "Service";
+
+        const customerProfile = Array.isArray(job.customer) ? job.customer[0] : job.customer;
+        const workerProfile   = Array.isArray(job.worker)   ? job.worker[0]   : job.worker;
+
+        // Show the other party's name depending on current user's role
+        const otherName = role === "worker"
+          ? (customerProfile as { full_name?: string } | null)?.full_name ?? "Customer"
+          : (workerProfile   as { full_name?: string } | null)?.full_name ?? "Worker";
+
+        const msgDate = new Date(msg.created_at);
+        const now     = new Date();
+        const isToday = msgDate.toDateString() === now.toDateString();
+        const lastTime = isToday
+          ? msgDate.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })
+          : msgDate.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+
+        conversations.push({
+          jobId:       job.id,
+          serviceType,
+          otherName,
+          lastMessage: msg.content ?? "",
+          lastTime,
+          status:      job.status,
+        });
+      }
+
+      return conversations;
+    },
+    refetchInterval: 30000,
+  });
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
 export default function MessagesScreen() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const { isOnline, role } = useAuth();
+  const { isOnline, role, user } = useAuth();
+
+  // Chat-specific state (only used when id is present)
   const { data: messages, isLoading } = useMessages(id || "");
-  const sendMessage = useSendMessage();
-  const editMessage = useEditMessage();
+  const sendMessage  = useSendMessage();
+  const editMessage  = useEditMessage();
   const deleteMessage = useDeleteMessage();
 
-  const [text, setText] = useState("");
+  const [text, setText]                   = useState("");
   const [activeMessageId, setActiveMessageId] = useState<string | null>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState("");
+  const [editingId, setEditingId]         = useState<string | null>(null);
+  const [editText, setEditText]           = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  // Conversations inbox (only used when id is absent)
+  const { data: conversations, isLoading: convsLoading } = useConversations(
+    user?.id,
+    role ?? undefined
+  );
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Dismiss action menu when tapping outside
   useEffect(() => {
     const dismiss = () => setActiveMessageId(null);
     document.addEventListener("click", dismiss);
@@ -47,7 +160,7 @@ export default function MessagesScreen() {
 
   const handleBubbleClick = (e: React.MouseEvent, msgId: string, isMine: boolean) => {
     if (!isMine) return;
-    e.stopPropagation(); // prevent dismiss handler
+    e.stopPropagation();
     setActiveMessageId((prev) => (prev === msgId ? null : msgId));
   };
 
@@ -79,6 +192,68 @@ export default function MessagesScreen() {
 
   const otherParty = role === "worker" ? "Customer" : "Worker";
 
+  // ── [FIX ISSUE 3] Conversations inbox — shown when no job id in URL ────────
+  if (!id) {
+    return (
+      <div className="app-shell flex flex-col h-screen bg-background">
+        <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-border bg-card px-4 py-3">
+          <button
+            onClick={() => navigate(-1)}
+            className="touch-target p-2 rounded-full hover:bg-muted transition-default"
+          >
+            <ChevronLeft className="h-5 w-5 text-foreground" />
+          </button>
+          <div className="flex-1">
+            <h2 className="text-sm font-bold text-foreground">Messages</h2>
+            <span className="text-xs text-muted-foreground">All conversations</span>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          {convsLoading ? (
+            <div className="space-y-3">
+              {[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 rounded-xl" />)}
+            </div>
+          ) : !conversations?.length ? (
+            <div className="flex flex-col items-center justify-center h-full py-20 text-center">
+              <div className="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
+                <MessageCircle className="h-8 w-8 text-muted-foreground/50" />
+              </div>
+              <h3 className="text-base font-bold text-foreground mb-1">No conversations yet</h3>
+              <p className="text-sm text-muted-foreground">
+                Your job chats will appear here once a booking is active
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {conversations.map((conv) => (
+                <button
+                  key={conv.jobId}
+                  onClick={() => navigate(`/messages/${conv.jobId}`)}
+                  className="w-full flex items-center gap-3 rounded-xl border border-border bg-card px-4 py-3 text-left transition-default hover:bg-muted/50"
+                >
+                  <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center shrink-0 text-primary font-bold text-sm">
+                    {conv.otherName.charAt(0)}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-foreground">{conv.otherName}</p>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {conv.serviceType} · {conv.lastMessage}
+                    </p>
+                  </div>
+                  {conv.lastTime && (
+                    <span className="text-[10px] text-muted-foreground shrink-0">{conv.lastTime}</span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Existing full chat view — IDENTICAL to original ───────────────────────
   return (
     <div className="app-shell flex flex-col h-screen bg-background">
       {/* Header — unchanged */}
@@ -114,7 +289,6 @@ export default function MessagesScreen() {
             ))}
           </div>
         ) : !messages || messages.length === 0 ? (
-          /* ── Empty state ── */
           <div className="flex flex-col items-center justify-center h-full py-20 text-center">
             <div className="h-16 w-16 rounded-full bg-muted flex items-center justify-center mb-4">
               <MessageCircle className="h-8 w-8 text-muted-foreground/50" />
@@ -142,7 +316,6 @@ export default function MessagesScreen() {
 
                   {/* Bubble */}
                   {isEditing ? (
-                    /* ── Edit mode inline ── */
                     <div className="flex items-center gap-2 max-w-[80%]">
                       <Input
                         value={editText}
@@ -182,7 +355,7 @@ export default function MessagesScreen() {
                     </div>
                   )}
 
-                  {/* ── Edit / Delete action row — only own messages, on tap ── */}
+                  {/* Edit / Delete action row */}
                   {isActive && !isEditing && (
                     <div
                       onClick={(e) => e.stopPropagation()}

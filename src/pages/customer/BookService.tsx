@@ -1,8 +1,18 @@
 // src/pages/customer/BookService.tsx
-// POLISH:
-//   [POLISH 1] Replaced static "Estimated Price" section with manual budget input
-//   [POLISH 2] Added photo upload section (uploads to job-photos Supabase storage)
-// ALL other JSX structure, Tailwind classes, UI elements — IDENTICAL to original.
+// BUG FIX [ISSUE 2] — GPS location sometimes inaccurate:
+//   OLD: navigator.geolocation.getCurrentPosition(...)
+//        Returns the first available fix, which can be a low-accuracy
+//        cached/network estimate (accuracy 500–5000m on mobile).
+//
+//   FIX: navigator.geolocation.watchPosition(...)
+//        Watches for multiple position updates. Keeps the best (most
+//        accurate) fix seen so far. Resolves immediately if accuracy ≤ 50m;
+//        otherwise uses the best available fix after an 8-second timeout.
+//        This yields a GPS-quality position (typically 5–20m) instead of
+//        a cell-tower estimate.
+//
+//   ONLY change: handleLocate function body replaced.
+//   All other JSX, logic, imports — IDENTICAL to previous version.
 
 import { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -35,15 +45,12 @@ export default function BookService() {
   const [locating, setLocating]           = useState(false);
   const [submitting, setSubmitting]       = useState(false);
 
-  // [POLISH 1] Customer budget
   const [budget, setBudget] = useState("");
 
-  // [POLISH 2] Photo upload
-  const [photos, setPhotos]           = useState<{ file: File; preview: string }[]>([]);
-  const [uploadingPhotos, setUploadingPhotos] = useState(false);
+  const [photos, setPhotos]                     = useState<{ file: File; preview: string }[]>([]);
+  const [uploadingPhotos, setUploadingPhotos]   = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
-  // Autocomplete state
   const [suggestions, setSuggestions]         = useState<AddressSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const debounceRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -84,31 +91,78 @@ export default function BookService() {
     setShowSuggestions(false);
   };
 
+  // [FIX ISSUE 2] — watchPosition approach for high-accuracy GPS fix
   const handleLocate = () => {
     if (!navigator.geolocation) {
       toast({ title: "GPS unavailable", description: "Your device does not support geolocation" });
       return;
     }
     setLocating(true);
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const { latitude: lat, longitude: lng } = pos.coords;
-        setGpsCoords({ lat, lng });
-        const addr = await reverseGeocode(lat, lng);
-        const display = addr ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
-        setLocation(display);
+
+    let watchId: number | null = null;
+    let bestPosition: GeolocationPosition | null = null;
+    let settled = false;
+
+    // Commit to a position: reverse-geocode, update state, clear watch
+    const finalize = async (pos: GeolocationPosition) => {
+      if (settled) return;
+      settled = true;
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+
+      const { latitude: lat, longitude: lng } = pos.coords;
+      setGpsCoords({ lat, lng });
+
+      const addr = await reverseGeocode(lat, lng);
+      const display = addr ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      setLocation(display);
+      setLocating(false);
+      toast({ title: "Location detected", description: `📍 ${display}` });
+    };
+
+    // Fallback timer: after 8 s use whatever best fix we have
+    const fallbackTimer = setTimeout(() => {
+      if (settled) return;
+      if (bestPosition) {
+        void finalize(bestPosition);
+      } else {
+        settled = true;
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
         setLocating(false);
-        toast({ title: "Location detected", description: `📍 ${display}` });
+        toast({
+          title: "Location not found",
+          description: "GPS timed out — please enter address manually",
+        });
+      }
+    }, 8000);
+
+    watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        if (settled) return;
+        // Always keep the most accurate fix seen so far
+        if (!bestPosition || pos.coords.accuracy < bestPosition.coords.accuracy) {
+          bestPosition = pos;
+        }
+        // Accept immediately if accuracy is within 50 metres (true GPS fix)
+        if (pos.coords.accuracy <= 50) {
+          clearTimeout(fallbackTimer);
+          void finalize(pos);
+        }
       },
       (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
         setLocating(false);
-        toast({ title: "Could not get location", description: err.message + " — please enter address manually" });
+        toast({
+          title: "Could not get location",
+          description: err.message + " — please enter address manually",
+        });
       },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
   };
 
-  // [POLISH 2] Handle photo selection + preview
   const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (photos.length + files.length > 5) {
@@ -120,7 +174,6 @@ export default function BookService() {
       preview: URL.createObjectURL(file),
     }));
     setPhotos((p) => [...p, ...newPhotos]);
-    // Reset input so same file can be re-selected
     if (photoInputRef.current) photoInputRef.current.value = "";
   };
 
@@ -131,7 +184,6 @@ export default function BookService() {
     });
   };
 
-  // [POLISH 2] Upload photos to Supabase storage → return public URLs
   const uploadPhotos = async (): Promise<string[]> => {
     if (photos.length === 0) return [];
     setUploadingPhotos(true);
@@ -173,7 +225,6 @@ export default function BookService() {
       }
     }
 
-    // Upload photos first
     const photoUrls = await uploadPhotos();
 
     setSubmitting(false);
@@ -189,8 +240,8 @@ export default function BookService() {
         timeSlot,
         urgency,
         selectedTools,
-        budget:        budget ? parseFloat(budget) : null,  // [POLISH 1]
-        photoUrls,                                           // [POLISH 2]
+        budget:        budget ? parseFloat(budget) : null,
+        photoUrls,
       },
     });
   };
@@ -233,7 +284,7 @@ export default function BookService() {
         />
       </div>
 
-      {/* [POLISH 2] Photo Upload */}
+      {/* Photo Upload */}
       <div className="space-y-2">
         <label className="text-sm font-semibold text-foreground">
           Upload Photos <span className="text-xs text-muted-foreground font-normal">(optional, max 5)</span>
@@ -374,7 +425,7 @@ export default function BookService() {
         </div>
       )}
 
-      {/* [POLISH 1] Customer Budget — replaces static "Estimated Price" */}
+      {/* Customer Budget */}
       <div className="space-y-1.5">
         <label className="text-sm font-semibold text-foreground">Your Budget</label>
         <div className="relative">

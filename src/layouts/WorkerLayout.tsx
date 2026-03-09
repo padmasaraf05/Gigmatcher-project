@@ -1,16 +1,15 @@
 // src/layouts/WorkerLayout.tsx
 // PHASE 15: Added useUnreadMessages — combined badge on Bell + dot on Messages drawer item.
-// [CHANGE] Only change from original: import useUnreadMessages, combine on Bell,
-//          add badge span inside Messages drawer item. All other JSX IDENTICAL.
+// [LOGO] Replaced Briefcase icon in header with actual app logo image.
 
 import { useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/context/AuthContext";
-import { useUnreadCount, useUnreadMessages } from "@/hooks/useNotifications"; // [PHASE 15] added useUnreadMessages
+import { useUnreadCount, useUnreadMessages } from "@/hooks/useNotifications";
 import OfflineBanner from "@/components/OfflineBanner";
 import {
   Home, Search, DollarSign, User, Bell, Menu, X,
-  ToggleLeft, HelpCircle, Settings, MessageSquare, LogOut, Briefcase, MapPin,
+  ToggleLeft, HelpCircle, Settings, MessageSquare, LogOut, MapPin,
 } from "lucide-react";
 
 const NAV_ITEMS = [
@@ -36,9 +35,8 @@ export default function WorkerLayout() {
   const navigate   = useNavigate();
   const { logout } = useAuth();
   const { data: unreadCount    } = useUnreadCount();
-  const { data: unreadMessages } = useUnreadMessages(); // [PHASE 15]
+  const { data: unreadMessages } = useUnreadMessages();
 
-  // [PHASE 15] Bell shows combined: notifications + unread messages
   const totalUnread = (unreadCount ?? 0) + (unreadMessages ?? 0);
 
   const handleLogout = () => {
@@ -53,7 +51,12 @@ export default function WorkerLayout() {
       {/* Top Bar */}
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-border bg-card px-4 py-3">
         <div className="flex items-center gap-2">
-          <Briefcase className="h-6 w-6 text-primary" />
+          {/* [LOGO] Replaced <Briefcase> with actual app logo */}
+          <img
+            src="/icons/icon-512.png"
+            alt="GigMatcher logo"
+            className="h-6 w-6 rounded-md"
+          />
           <span className="text-lg font-bold text-foreground">
             Gig<span className="text-primary">Matcher</span>
           </span>
@@ -128,7 +131,6 @@ export default function WorkerLayout() {
                 >
                   <item.icon className="h-5 w-5 text-muted-foreground" />
                   <span className="text-sm font-medium">{item.label}</span>
-                  {/* [PHASE 15] Unread message badge on Messages drawer item */}
                   {item.label === "Messages" && (unreadMessages ?? 0) > 0 && (
                     <span className="ml-auto h-5 min-w-5 rounded-full bg-secondary text-secondary-foreground text-[10px] font-bold flex items-center justify-center px-1">
                       {(unreadMessages ?? 0) > 99 ? "99+" : unreadMessages}

@@ -89,7 +89,11 @@ export default function WorkerInvoice() {
         {/* Logo Header */}
         <div className="flex items-center justify-between border-b border-border pb-4">
           <div className="flex items-center gap-2">
-            <Briefcase className="h-6 w-6 text-primary" />
+             <img
+            src="/icons/icon-512.png"
+            alt="GigMatcher logo"
+            className="h-6 w-6 rounded-md"
+          />
             <span className="text-lg font-bold text-foreground">
               Gig<span className="text-primary">Matcher</span>
             </span>

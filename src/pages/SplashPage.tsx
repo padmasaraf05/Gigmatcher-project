@@ -18,9 +18,12 @@ export default function SplashPage() {
     <div className="app-shell flex flex-col items-center justify-center px-6 py-12">
       {/* Logo */}
       <div className="animate-fade-in-up mb-8 flex flex-col items-center" style={{ animationDelay: "0ms" }}>
-        <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-2xl bg-primary shadow-lg">
-          <Briefcase className="h-10 w-10 text-primary-foreground" />
-        </div>
+        {/* [CHANGE] Replaced Briefcase icon div with actual logo image */}
+        <img
+          src="/icons/icon-192.png"
+          alt="GigMatcher logo"
+          className="mb-4 h-20 w-20 rounded-2xl shadow-lg"
+        />
         <h1 className="text-3xl font-extrabold tracking-tight text-foreground">
           Gig<span className="text-primary">Matcher</span>
         </h1>
