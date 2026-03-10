@@ -1,15 +1,10 @@
 // src/pages/worker/WorkerJobDetail.tsx
-// FIX [NEW-ISSUE-3]: Phone button now initiates a real call.
-//   Changes:
-//     - Phone button onClick → window.location.href = `tel:${phone}`
-//     - Uses job.phone — already mapped by mapJobRow from profiles!customer_id(phone)
-//       in JOB_SELECT. No type extension or schema change needed.
-//   ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
-//
-// Previous polish notes preserved:
-//   [POLISH 5] CountdownRing timer: 60s → 300s (5 minutes)
-//   [POLISH 1a] Payment section shows "Customer Budget"
-//   [POLISH 1b] Shows customer-uploaded photos if any
+// [FIX Issue 4] Customer avatar showed initial letter only.
+//   OLD: <div ...>{job.customerName.charAt(0)}</div>
+//   FIX: renders <img> when job.customerPhoto is non-empty, initial letter fallback.
+//   job.customerPhoto already populated by mapJobRow via
+//   profiles!customer_id(profile_photo_url) in JOB_SELECT — no hook change needed.
+//   ALL other JSX, Tailwind classes, logic — IDENTICAL to previous version.
 
 import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -26,8 +21,6 @@ import {
   Star, Phone, MapPin, Check, X, MessageCircle, Navigation, ChevronLeft, ImageIcon,
 } from "lucide-react";
 import { toast } from "@/hooks/use-toast";
-
-// job.phone is already on the Job type — no extension needed
 
 export default function WorkerJobDetail() {
   const { id } = useParams<{ id: string }>();
@@ -73,7 +66,6 @@ export default function WorkerJobDetail() {
     navigate("/worker/jobs", { replace: true });
   };
 
-  // [FIX NEW-ISSUE-3] job.phone is already populated by mapJobRow → profiles!customer_id(phone)
   const handleCallCustomer = () => {
     const phone = job?.phone;
     if (phone) {
@@ -106,8 +98,6 @@ export default function WorkerJobDetail() {
   }
 
   const isLiveTracking = status === "en_route" || status === "in_progress";
-
-  // [POLISH 1b] photos from job
   const photoUrls: string[] = (job as Job & { photoUrls?: string[] }).photoUrls ?? [];
 
   return (
@@ -128,8 +118,13 @@ export default function WorkerJobDetail() {
 
       {/* Customer Card */}
       <div className="rounded-xl border border-border bg-card p-4 flex items-center gap-4">
-        <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center text-lg font-bold text-muted-foreground">
-          {job.customerName.charAt(0)}
+        {/* [FIX Issue 4] Show customer photo if available, initial letter fallback */}
+        <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center text-lg font-bold text-muted-foreground overflow-hidden shrink-0">
+          {job.customerPhoto ? (
+            <img src={job.customerPhoto} alt={job.customerName} className="h-full w-full object-cover" />
+          ) : (
+            job.customerName.charAt(0)
+          )}
         </div>
         <div className="flex-1">
           <h3 className="text-base font-bold text-foreground">{job.customerName}</h3>
@@ -138,7 +133,6 @@ export default function WorkerJobDetail() {
             <span>{job.customerRating}</span>
           </div>
         </div>
-        {/* [FIX NEW-ISSUE-3] onClick wired to handleCallCustomer */}
         <button
           onClick={handleCallCustomer}
           className="touch-target h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center transition-default hover:bg-primary/20"
@@ -159,7 +153,7 @@ export default function WorkerJobDetail() {
         </div>
       </div>
 
-      {/* [POLISH 1b] Customer photos */}
+      {/* Customer photos */}
       {photoUrls.length > 0 && (
         <div className="space-y-2">
           <h4 className="text-sm font-bold text-foreground flex items-center gap-2">
@@ -200,7 +194,7 @@ export default function WorkerJobDetail() {
         </div>
       )}
 
-      {/* [POLISH 1a] Customer Budget — replaces "Cash on completion" */}
+      {/* Customer Budget */}
       <div className="rounded-xl border border-border bg-card p-4 text-center">
         <p className="text-3xl font-bold text-foreground">₹{job.payment}</p>
         <p className="text-sm text-muted-foreground mt-1">
@@ -233,7 +227,6 @@ export default function WorkerJobDetail() {
         {status === "pending" && (
           <>
             <div className="flex items-center justify-center gap-3 mb-1">
-              {/* [POLISH 5] Timer changed from 60s → 300s (5 minutes) */}
               <CountdownRing seconds={300} total={300} onComplete={handleCountdownComplete} />
             </div>
             <div className="flex gap-3">

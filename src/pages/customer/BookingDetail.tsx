@@ -1,15 +1,10 @@
 // src/pages/customer/BookingDetail.tsx
-// FIX [NEW-ISSUE-3]: Phone button now initiates a real call.
-//   Changes:
-//     - Added handleCallWorker() — window.location.href = `tel:${booking.workerPhone}`
-//     - Phone button onClick wired to handleCallWorker
-//     - booking.workerPhone is already populated by useBookingDetail via
-//       profiles!worker_id(phone) in useCustomerApi.ts — no hook changes needed.
-//   ALL other JSX structure, Tailwind classes, layout — IDENTICAL to previous version.
-//
-// Previous fix notes preserved:
-//   [POLISH-2] photo gallery + lightbox
-//   [FIX prev] Google Maps directions URL
+// [FIX Issue 4] Worker avatar in booking detail showed initial letter only.
+//   OLD: <div ...>{booking.workerName.charAt(0)}</div>
+//   FIX: renders <img> when booking.workerPhoto is non-empty, falls back to initial.
+//   booking.workerPhoto already populated by useBookingDetail via
+//   profiles!worker_id(profile_photo_url) in useCustomerApi.ts — no hook change needed.
+//   ALL other JSX, Tailwind classes, layout — IDENTICAL to previous version.
 
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
@@ -33,10 +28,10 @@ export default function BookingDetail() {
   const cancelBooking = useCancelBooking();
   const submitReview = useSubmitReview();
 
-  const [showCancel, setShowCancel]       = useState(false);
-  const [rating, setRating]               = useState(0);
-  const [comment, setComment]             = useState("");
-  const [lightboxUrl, setLightboxUrl]     = useState<string | null>(null);
+  const [showCancel, setShowCancel]   = useState(false);
+  const [rating, setRating]           = useState(0);
+  const [comment, setComment]         = useState("");
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   if (isLoading) {
     return (
@@ -65,9 +60,6 @@ export default function BookingDetail() {
     window.open(url, "_blank");
   };
 
-  // [FIX NEW-ISSUE-3] Initiate call to worker using booking.workerPhone
-  // booking.workerPhone is populated by useBookingDetail →
-  //   profiles!worker_id(phone) in useCustomerApi.ts
   const handleCallWorker = () => {
     if (booking.workerPhone) {
       window.location.href = `tel:${booking.workerPhone}`;
@@ -106,8 +98,13 @@ export default function BookingDetail() {
 
       {/* Worker Info */}
       <div className="rounded-xl border border-border bg-card p-4 flex items-center gap-4">
-        <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center text-lg font-bold text-muted-foreground shrink-0">
-          {booking.workerName.charAt(0)}
+        {/* [FIX Issue 4] Show photo if available, initial letter fallback */}
+        <div className="h-14 w-14 rounded-full bg-muted flex items-center justify-center text-lg font-bold text-muted-foreground shrink-0 overflow-hidden">
+          {booking.workerPhoto ? (
+            <img src={booking.workerPhoto} alt={booking.workerName} className="h-full w-full object-cover" />
+          ) : (
+            booking.workerName.charAt(0)
+          )}
         </div>
         <div className="flex-1">
           <h3 className="text-base font-bold text-foreground">{booking.workerName}</h3>
@@ -117,7 +114,6 @@ export default function BookingDetail() {
           </div>
         </div>
         <div className="flex gap-2">
-          {/* [FIX NEW-ISSUE-3] onClick wired to handleCallWorker */}
           <button
             onClick={handleCallWorker}
             className="touch-target h-11 w-11 rounded-full bg-primary/10 flex items-center justify-center transition-default hover:bg-primary/20"
@@ -164,11 +160,7 @@ export default function BookingDetail() {
                 onClick={() => setLightboxUrl(url)}
                 className="relative aspect-square rounded-lg overflow-hidden border border-border bg-muted hover:opacity-90 transition-opacity"
               >
-                <img
-                  src={url}
-                  alt={`Job photo ${i + 1}`}
-                  className="w-full h-full object-cover"
-                />
+                <img src={url} alt={`Job photo ${i + 1}`} className="w-full h-full object-cover" />
               </button>
             ))}
           </div>
@@ -267,25 +259,23 @@ export default function BookingDetail() {
 
       {/* Full-screen photo lightbox */}
       {lightboxUrl && (
-        <>
-          <div
-            className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center animate-fade-in"
+        <div
+          className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center animate-fade-in"
+          onClick={() => setLightboxUrl(null)}
+        >
+          <button
             onClick={() => setLightboxUrl(null)}
+            className="absolute top-4 right-4 h-10 w-10 rounded-full bg-white/20 flex items-center justify-center"
           >
-            <button
-              onClick={() => setLightboxUrl(null)}
-              className="absolute top-4 right-4 h-10 w-10 rounded-full bg-white/20 flex items-center justify-center"
-            >
-              <X className="h-5 w-5 text-white" />
-            </button>
-            <img
-              src={lightboxUrl}
-              alt="Full size"
-              className="max-w-full max-h-full object-contain rounded-lg"
-              onClick={(e) => e.stopPropagation()}
-            />
-          </div>
-        </>
+            <X className="h-5 w-5 text-white" />
+          </button>
+          <img
+            src={lightboxUrl}
+            alt="Full size"
+            className="max-w-full max-h-full object-contain rounded-lg"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
       )}
     </div>
   );

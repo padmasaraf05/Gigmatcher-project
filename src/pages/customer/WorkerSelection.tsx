@@ -1,10 +1,9 @@
 // src/pages/customer/WorkerSelection.tsx
-// BUG FIX [ISSUE 1b]:
-//   Worker cards showed ₹0/hr when the worker hadn't set hourly_rate in DB.
-//   FIX: when customer entered a budget in BookService, show that budget on
-//        the worker card as the price reference. Falls back to worker rate
-//        if no budget was entered.
-//   ONLY change: the price span now reads formState.budget first.
+// [FIX Issue 4] Worker photo was never rendered in the card avatar.
+//   OLD: always showed {worker.name.charAt(0)} initial letter
+//   FIX: shows <img> when worker.photo is a non-empty string,
+//        falls back to initial letter if photo is missing.
+//   Container div: identical size/shape (h-12 w-12 rounded-full).
 //   All other JSX, Tailwind classes, logic — IDENTICAL to previous version.
 
 import { useState } from "react";
@@ -31,7 +30,7 @@ interface BookFormState {
   timeSlot?: string;
   urgency?: "normal" | "urgent";
   selectedTools?: string[];
-  budget?: number | null;      // [FIX 1b] customer's budget from BookService
+  budget?: number | null;
   photoUrls?: string[];
 }
 
@@ -142,8 +141,13 @@ export default function WorkerSelection() {
               className="rounded-xl border border-border bg-card p-4 transition-default"
             >
               <div className="flex items-start gap-3 mb-3">
-                <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center text-base font-bold text-muted-foreground shrink-0">
-                  {worker.name.charAt(0)}
+                {/* [FIX Issue 4] Show photo if available, initial letter fallback */}
+                <div className="h-12 w-12 rounded-full bg-muted flex items-center justify-center text-base font-bold text-muted-foreground shrink-0 overflow-hidden">
+                  {worker.photo ? (
+                    <img src={worker.photo} alt={worker.name} className="h-full w-full object-cover" />
+                  ) : (
+                    worker.name.charAt(0)
+                  )}
                 </div>
                 <div className="flex-1 min-w-0">
                   <h4 className="text-sm font-bold text-foreground">{worker.name}</h4>
@@ -157,7 +161,6 @@ export default function WorkerSelection() {
                     <span className="text-xs text-muted-foreground">{worker.distance}</span>
                   </div>
                 </div>
-                {/* [FIX 1b] Show customer budget when entered, else worker hourly rate */}
                 <span className="text-base font-bold text-foreground">
                   {formState.budget
                     ? `₹${formState.budget} budget`

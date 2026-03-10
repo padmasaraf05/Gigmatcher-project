@@ -1,10 +1,14 @@
 // src/pages/SharedProfile.tsx
-// POLISH-2 FIX [CUSTOMER PROFILE PHOTO]:
-//   handlePhotoUpload now wires a real hidden file input → uploads to
-//   profile-photos Supabase Storage bucket at path customers/{uid}/avatar.{ext}
-//   → saves public URL to profiles.avatar_url → shows avatar preview.
-//   Added: photoInputRef, handlePhotoChange(), spinner during upload.
-// ALL other JSX structure, Tailwind classes, layout — IDENTICAL to original.
+// [FIX Issue 4] Customer profile photo upload was writing to profiles.avatar_url
+//   which does not exist (column was dropped). All hooks read profile_photo_url.
+//
+//   Changes from previous version:
+//     1. fetchProfile SELECT: "full_name, avatar_url" → "full_name, profile_photo_url"
+//     2. fetchProfile read:   profile?.avatar_url     → profile?.profile_photo_url
+//     3. DB UPDATE:           { avatar_url: publicUrl } → { profile_photo_url: publicUrl }
+//
+//   Storage path unchanged: customers/{uid}/avatar.{ext}
+//   ALL other JSX, Tailwind classes, layout — IDENTICAL to original.
 
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
@@ -27,23 +31,22 @@ export default function SharedProfile() {
   const [saving, setSaving]             = useState(false);
   const [showLogout, setShowLogout]     = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
-  // [POLISH-2 FIX] uploading state + hidden file input ref
   const [uploading, setUploading]       = useState(false);
   const photoInputRef                   = useRef<HTMLInputElement>(null);
 
-  // Sync name from DB on mount (AuthContext cache may be stale)
   useEffect(() => {
     const fetchProfile = async () => {
       const { data: authData } = await supabase.auth.getUser();
       if (!authData?.user) return;
       const { data: profile } = await supabase
         .from("profiles")
-        .select("full_name, avatar_url")
+        // [FIX] was: "full_name, avatar_url"
+        .select("full_name, profile_photo_url")
         .eq("id", authData.user.id)
         .single();
       if (profile?.full_name) setName(profile.full_name);
-      // [POLISH-2 FIX] load existing avatar if present
-      if (profile?.avatar_url) setPhotoPreview(profile.avatar_url);
+      // [FIX] was: profile?.avatar_url
+      if (profile?.profile_photo_url) setPhotoPreview(profile.profile_photo_url);
     };
     fetchProfile();
   }, []);
@@ -54,25 +57,21 @@ export default function SharedProfile() {
 
   const handleSave = async () => {
     setSaving(true);
-
     const { data: authData } = await supabase.auth.getUser();
     if (!authData?.user) {
       setSaving(false);
       toast({ title: "Not authenticated", description: "Please log in again." });
       return;
     }
-
     const { error } = await supabase
       .from("profiles")
       .update({ full_name: name.trim() })
       .eq("id", authData.user.id);
-
     if (error) {
       setSaving(false);
       toast({ title: "Could not save profile", description: error.message });
       return;
     }
-
     await refreshUser();
     setSaving(false);
     toast({ title: "Profile updated ✓" });
@@ -84,17 +83,14 @@ export default function SharedProfile() {
     navigate("/login", { replace: true });
   };
 
-  // [POLISH-2 FIX] Trigger hidden file input
   const handlePhotoClick = () => {
     if (!uploading) photoInputRef.current?.click();
   };
 
-  // [POLISH-2 FIX] Upload file to Supabase Storage → save URL to profiles.avatar_url
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate file type and size
     if (!file.type.startsWith("image/")) {
       toast({ title: "Please select an image file" });
       return;
@@ -111,36 +107,32 @@ export default function SharedProfile() {
       const uid = authData?.user?.id;
       if (!uid) throw new Error("Not authenticated");
 
-      // Show local preview immediately
       const previewUrl = URL.createObjectURL(file);
       setPhotoPreview(previewUrl);
 
       const ext = file.name.split(".").pop()?.toLowerCase() ?? "jpg";
       const storagePath = `customers/${uid}/avatar.${ext}`;
 
-      // Upload to profile-photos bucket (same bucket as worker, different path prefix)
       const { error: uploadError } = await supabase.storage
         .from("profile-photos")
         .upload(storagePath, file, { upsert: true, contentType: file.type });
 
       if (uploadError) throw new Error(uploadError.message);
 
-      // Get public URL
       const { data: urlData } = supabase.storage
         .from("profile-photos")
         .getPublicUrl(storagePath);
 
       const publicUrl = urlData.publicUrl;
 
-      // Save to profiles table — avatar_url column
+      // [FIX] was: { avatar_url: publicUrl }
       const { error: dbError } = await supabase
         .from("profiles")
-        .update({ avatar_url: publicUrl })
+        .update({ profile_photo_url: publicUrl })
         .eq("id", uid);
 
       if (dbError) throw new Error(dbError.message);
 
-      // Replace object URL with real URL
       setPhotoPreview(publicUrl);
       await refreshUser();
       toast({ title: "Photo updated ✓" });
@@ -149,11 +141,9 @@ export default function SharedProfile() {
         title: "Upload failed",
         description: err instanceof Error ? err.message : "Please try again",
       });
-      // Revert preview on failure
       setPhotoPreview(null);
     } finally {
       setUploading(false);
-      // Clear input so same file can be re-selected
       if (photoInputRef.current) photoInputRef.current.value = "";
     }
   };
@@ -171,7 +161,6 @@ export default function SharedProfile() {
       <div className="px-4 py-5 space-y-6 pb-24">
         {/* Photo */}
         <div className="flex justify-center">
-          {/* [POLISH-2 FIX] hidden file input */}
           <input
             ref={photoInputRef}
             type="file"
@@ -188,7 +177,6 @@ export default function SharedProfile() {
             ) : (
               <Camera className="h-7 w-7 text-primary" />
             )}
-            {/* [POLISH-2 FIX] spinner overlay during upload, camera badge otherwise */}
             <div className="absolute bottom-0 right-0 h-7 w-7 rounded-full bg-primary flex items-center justify-center border-2 border-card">
               {uploading ? (
                 <Loader2 className="h-3.5 w-3.5 text-primary-foreground animate-spin" />

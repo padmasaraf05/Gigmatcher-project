@@ -1,10 +1,28 @@
 // src/pages/worker/WorkerOnboarding.tsx
-// PHASE 3 CHANGE (1 line block, marked // [P2]):
-//   worker_profiles upsert now includes hourly_rate and availability_days
-//   (columns added in Phase 1 — must be present or DB will use column defaults)
-// ALL UI, JSX, Tailwind classes, step logic — IDENTICAL to original.
+// [FIX] Issues 2, 3, 4:
+//
+// Issue 2 — Service Area:
+//   OLD: handleLocate() hardcoded "Indore, Madhya Pradesh" (mock)
+//        manualArea input had no suggestions
+//   FIX: handleLocate() uses real watchPosition with enableHighAccuracy + Nominatim
+//        reverse geocode (same strategy as BookService GPS fix).
+//        manualArea input now shows Nominatim autocomplete dropdown on typing.
+//
+// Issue 3 — Profile Photo:
+//   OLD: handlePhotoMock() set photoPreview to "/placeholder.svg" (mock)
+//        No file input existed. Photo never uploaded.
+//   FIX: Hidden <input type="file"> ref. On tap → opens file picker.
+//        Selected image previewed locally immediately.
+//        On "Complete Registration" → uploaded to Supabase `profile-photos` bucket.
+//
+// Issue 4 — Photo not saved to DB:
+//   OLD: handleComplete() hardcoded profile_photo_url: null
+//   FIX: handleComplete() uploads photo first if selected, then saves real URL
+//        to profiles table. Worker and customer side both read this URL.
+//
+// UI JSX, Tailwind classes, step logic — IDENTICAL to original.
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
@@ -21,10 +39,63 @@ import { supabase } from "@/lib/supabase";
 type ExpLevel = "Beginner" | "Intermediate" | "Expert";
 interface SkillEntry { name: string; level: ExpLevel }
 
+// ─── Nominatim helpers (inline — no geocode.ts dependency) ──────────────────
+
+async function reverseGeocodeWorker(lat: number, lng: number): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=10`,
+      { headers: { "User-Agent": "GigMatcher/1.0 (gigmatcher@example.com)" } }
+    );
+    if (!res.ok) return null;
+    const data = await res.json() as {
+      address?: { city?: string; town?: string; village?: string; state?: string; country?: string };
+      display_name?: string;
+    };
+    const a = data.address;
+    if (!a) return data.display_name ?? null;
+    const city  = a.city ?? a.town ?? a.village ?? "";
+    const state = a.state ?? "";
+    return [city, state].filter(Boolean).join(", ") || data.display_name || null;
+  } catch { return null; }
+}
+
+interface AreaSuggestion { displayName: string; shortName: string; lat: number; lng: number }
+
+async function searchAreaSuggestions(query: string): Promise<AreaSuggestion[]> {
+  try {
+    const res = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&q=${encodeURIComponent(query + ", India")}`,
+      { headers: { "User-Agent": "GigMatcher/1.0 (gigmatcher@example.com)" } }
+    );
+    if (!res.ok) return [];
+    const data = await res.json() as {
+      display_name: string;
+      lat: string; lon: string;
+      address?: { city?: string; town?: string; village?: string; state?: string };
+    }[];
+    return data.map((item) => {
+      const a = item.address;
+      const city  = a?.city ?? a?.town ?? a?.village ?? "";
+      const state = a?.state ?? "";
+      return {
+        displayName: item.display_name,
+        shortName:   [city, state].filter(Boolean).join(", ") || item.display_name,
+        lat:         parseFloat(item.lat),
+        lng:         parseFloat(item.lon),
+      };
+    });
+  } catch { return []; }
+}
+
+// ─── Static data ─────────────────────────────────────────────────────────────
+
 const SCHEMES = [
   { name: "PM Vishwakarma Yojana", desc: "Financial assistance for traditional artisans", eligible: true },
   { name: "PMEGP", desc: "Micro enterprise generation programme", eligible: false },
 ];
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function WorkerOnboarding() {
   const navigate = useNavigate();
@@ -41,14 +112,24 @@ export default function WorkerOnboarding() {
   const [customTool, setCustomTool] = useState("");
 
   // Step 3
-  const [location, setLocation] = useState("");
-  const [radius, setRadius] = useState([5]);
-  const [manualArea, setManualArea] = useState("");
+  const [location, setLocation]   = useState("");
+  const [locating, setLocating]   = useState(false);
+  const [gpsCoords, setGpsCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [radius, setRadius]       = useState([5]);
+  const [manualArea, setManualArea]           = useState("");
+  const [areaSuggestions, setAreaSuggestions] = useState<AreaSuggestion[]>([]);
+  const [showAreaSuggestions, setShowAreaSuggestions] = useState(false);
+  const areaDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const areaSuggestionsRef = useRef<HTMLDivElement>(null);
 
   // Step 4
+  const [photoFile, setPhotoFile]       = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
 
   const progress = step * 25;
+
+  // ── Step 1 helpers ──────────────────────────────────────────────────────────
 
   const toggleSkill = (name: string) => {
     setSkills((prev) =>
@@ -70,15 +151,116 @@ export default function WorkerOnboarding() {
     new Set(skills.flatMap((s) => TOOLS_BY_SKILL[s.name] || []))
   );
 
+  // ── Step 3: Real GPS ────────────────────────────────────────────────────────
+  // [FIX Issue 2] watchPosition with enableHighAccuracy + Nominatim reverse geocode
+  // Identical strategy to BookService.tsx GPS fix.
+
   const handleLocate = () => {
-    setLocation("Indore, Madhya Pradesh");
-    toast({ title: "Location detected", description: "Indore, MP" });
+    if (!navigator.geolocation) {
+      toast({ title: "GPS unavailable", description: "Your device does not support geolocation" });
+      return;
+    }
+    setLocating(true);
+
+    let watchId: number | null = null;
+    let bestPosition: GeolocationPosition | null = null;
+    let settled = false;
+
+    const finalize = async (pos: GeolocationPosition) => {
+      if (settled) return;
+      settled = true;
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+
+      const { latitude: lat, longitude: lng } = pos.coords;
+      setGpsCoords({ lat, lng });
+
+      const addr = await reverseGeocodeWorker(lat, lng);
+      const display = addr ?? `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+      setLocation(display);
+      setLocating(false);
+      toast({ title: "Location detected", description: `📍 ${display}` });
+    };
+
+    const fallbackTimer = setTimeout(() => {
+      if (settled) return;
+      if (bestPosition) {
+        void finalize(bestPosition);
+      } else {
+        settled = true;
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+        setLocating(false);
+        toast({
+          title: "Location not found",
+          description: "GPS timed out — please enter city manually",
+        });
+      }
+    }, 8000);
+
+    watchId = navigator.geolocation.watchPosition(
+      (pos) => {
+        if (settled) return;
+        if (!bestPosition || pos.coords.accuracy < bestPosition.coords.accuracy) {
+          bestPosition = pos;
+        }
+        if (pos.coords.accuracy <= 50) {
+          clearTimeout(fallbackTimer);
+          void finalize(pos);
+        }
+      },
+      (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(fallbackTimer);
+        if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+        setLocating(false);
+        toast({
+          title: "Could not get location",
+          description: err.message + " — please enter city manually",
+        });
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
   };
 
-  const handlePhotoMock = () => {
-    setPhotoPreview("/placeholder.svg");
-    toast({ title: "Photo selected" });
+  // ── Step 3: Manual area autocomplete ────────────────────────────────────────
+  // [FIX Issue 2] Nominatim city/area suggestions on typing
+
+  const handleManualAreaChange = (value: string) => {
+    setManualArea(value);
+    setGpsCoords(null);
+    if (areaDebounceRef.current) clearTimeout(areaDebounceRef.current);
+    if (value.trim().length < 3) {
+      setAreaSuggestions([]);
+      setShowAreaSuggestions(false);
+      return;
+    }
+    areaDebounceRef.current = setTimeout(async () => {
+      const results = await searchAreaSuggestions(value);
+      setAreaSuggestions(results);
+      setShowAreaSuggestions(results.length > 0);
+    }, 400);
   };
+
+  const handleSelectAreaSuggestion = (s: AreaSuggestion) => {
+    setManualArea(s.shortName);
+    setGpsCoords({ lat: s.lat, lng: s.lng });
+    setAreaSuggestions([]);
+    setShowAreaSuggestions(false);
+  };
+
+  // ── Step 4: Real photo selection ─────────────────────────────────────────────
+  // [FIX Issue 3] file picker → local preview → uploaded in handleComplete
+
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setPhotoFile(file);
+    const previewUrl = URL.createObjectURL(file);
+    setPhotoPreview(previewUrl);
+    if (photoInputRef.current) photoInputRef.current.value = "";
+  };
+
+  // ── Complete registration ────────────────────────────────────────────────────
 
   const handleComplete = async () => {
     try {
@@ -92,6 +274,25 @@ export default function WorkerOnboarding() {
       }
 
       const workerId = authData.user.id;
+
+      // ── [FIX Issue 3+4] Upload profile photo to Supabase Storage ──────────
+      let photoUrl: string | null = null;
+      if (photoFile) {
+        const ext = photoFile.name.split(".").pop() ?? "jpg";
+        const path = `${workerId}/avatar.${ext}`;
+        const { error: uploadErr } = await supabase.storage
+          .from("profile-photos")
+          .upload(path, photoFile, { upsert: true });
+        if (!uploadErr) {
+          const { data: urlData } = supabase.storage
+            .from("profile-photos")
+            .getPublicUrl(path);
+          photoUrl = urlData.publicUrl;
+        } else {
+          // Non-fatal — continue registration without photo
+          console.warn("Photo upload failed:", uploadErr.message);
+        }
+      }
 
       const { data: categories, error: catError } = await supabase
         .from("service_categories")
@@ -146,6 +347,7 @@ export default function WorkerOnboarding() {
       const phoneDigits =
         normalizePhoneDigits(phoneFromUser) ?? normalizePhoneDigits(phoneFromAuth);
 
+      // [FIX Issue 4] Save real photoUrl instead of hardcoded null
       const { error: profileError } = await supabase.from("profiles").upsert(
         {
           id: workerId,
@@ -153,7 +355,7 @@ export default function WorkerOnboarding() {
           full_name: fullName,
           phone: phoneDigits,
           language: language,
-          profile_photo_url: null,
+          profile_photo_url: photoUrl, // [FIX] was: null
         },
         { onConflict: "id" },
       );
@@ -164,22 +366,23 @@ export default function WorkerOnboarding() {
         return;
       }
 
-      // [P3] Added hourly_rate and availability_days — required by Phase 1 schema.
-      // hourly_rate defaults to 0 (worker sets it later in WorkerProfile).
-      // availability_days defaults to all 7 days available.
+      // Resolve location: GPS coords from "Use My Current Location" OR autocomplete selection
+      const finalLat = gpsCoords?.lat ?? null;
+      const finalLng = gpsCoords?.lng ?? null;
+
       const { error: workerProfileError } = await supabase.from("worker_profiles").upsert(
         {
           user_id: workerId,
           service_radius_km: radius[0],
-          latitude: null,
-          longitude: null,
+          latitude:  finalLat,   // [FIX] real coords, not null
+          longitude: finalLng,   // [FIX] real coords, not null
           is_available: false,
           is_pro: false,
           scheme_eligible: schemeEligible,
           rating: 0,
           total_reviews: 0,
-          hourly_rate: 0,                                           // [P3]
-          availability_days: [true, true, true, true, true, true, true], // [P3]
+          hourly_rate: 0,
+          availability_days: [true, true, true, true, true, true, true],
         },
         { onConflict: "user_id" },
       );
@@ -395,7 +598,8 @@ export default function WorkerOnboarding() {
               )}
             </div>
 
-            <LoadingButton variant="outline" onClick={handleLocate}>
+            {/* [FIX Issue 2] Real GPS button */}
+            <LoadingButton variant="outline" loading={locating} onClick={handleLocate}>
               <MapPin className="h-4 w-4" /> Use My Current Location
             </LoadingButton>
 
@@ -410,11 +614,34 @@ export default function WorkerOnboarding() {
               </div>
             </div>
 
-            <Input
-              placeholder="Or enter city/area manually"
-              value={manualArea}
-              onChange={(e) => setManualArea(e.target.value)}
-            />
+            {/* [FIX Issue 2] Manual area with Nominatim autocomplete */}
+            <div className="relative" ref={areaSuggestionsRef}>
+              <Input
+                placeholder="Or enter city/area manually"
+                value={manualArea}
+                onChange={(e) => handleManualAreaChange(e.target.value)}
+                onFocus={() => areaSuggestions.length > 0 && setShowAreaSuggestions(true)}
+                autoComplete="off"
+              />
+              {showAreaSuggestions && areaSuggestions.length > 0 && (
+                <div className="absolute top-full left-0 right-0 z-50 mt-1 bg-card border border-border rounded-xl shadow-lg overflow-hidden">
+                  {areaSuggestions.map((s, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      onClick={() => handleSelectAreaSuggestion(s)}
+                      className="w-full text-left px-4 py-3 text-sm hover:bg-muted transition-default flex items-start gap-2 border-b border-border last:border-0"
+                    >
+                      <MapPin className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+                      <div className="min-w-0">
+                        <p className="font-medium text-foreground truncate">{s.shortName}</p>
+                        <p className="text-xs text-muted-foreground truncate">{s.displayName}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -423,8 +650,16 @@ export default function WorkerOnboarding() {
             <h2 className="text-xl font-bold text-foreground">Almost Done!</h2>
 
             <div className="flex flex-col items-center gap-3">
+              {/* [FIX Issue 3] Real file input — hidden, triggered by button tap */}
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handlePhotoSelect}
+              />
               <button
-                onClick={handlePhotoMock}
+                onClick={() => photoInputRef.current?.click()}
                 className="relative h-28 w-28 rounded-full border-2 border-dashed border-primary bg-muted flex items-center justify-center overflow-hidden transition-default hover:border-primary/70"
               >
                 {photoPreview ? (

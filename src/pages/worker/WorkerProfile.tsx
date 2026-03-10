@@ -1,7 +1,15 @@
 // src/pages/worker/WorkerProfile.tsx
-// POLISH [ISSUE 2]:
-//   Camera button now opens a real file picker → uploads to Supabase
-//   "profile-photos" storage bucket → saves public URL in profiles.avatar_url
+// [FIX Issue 4] Two bugs causing profile photo to not show on customer/worker side:
+//
+//   BUG 1: Was saving to profiles.avatar_url — column does not exist.
+//          All queries (useWorkerApi, useCustomerApi) read profile_photo_url.
+//          FIX: changed every reference: avatar_url → profile_photo_url
+//
+//   BUG 2: Storage path was "workers/{userId}/avatar.ext"
+//          WorkerOnboarding saves to "{userId}/avatar.ext"
+//          Both now use the same path so they overwrite each other correctly.
+//          FIX: path changed to `${userId}/avatar.${ext}` (no "workers/" prefix)
+//
 // ALL JSX, Tailwind classes, state, other handlers — IDENTICAL to original.
 
 import { useState, useEffect, useRef } from "react";
@@ -26,8 +34,8 @@ export default function WorkerProfile() {
   const [newSkill, setNewSkill]   = useState("");
   const [newTool, setNewTool]     = useState("");
 
-  // [POLISH 2] Profile photo state
-  const [avatarUrl, setAvatarUrl]       = useState<string | null>(null);
+  // Profile photo state
+  const [avatarUrl, setAvatarUrl]           = useState<string | null>(null);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const photoInputRef = useRef<HTMLInputElement>(null);
 
@@ -35,7 +43,7 @@ export default function WorkerProfile() {
     setLanguages((p) => (p.includes(lang) ? p.filter((l) => l !== lang) : [...p, lang]));
   };
 
-  // [POLISH 2] Upload profile photo → Supabase storage → save URL in profiles
+  // [FIX] Upload photo → Supabase storage → save URL in profiles.profile_photo_url
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -47,9 +55,9 @@ export default function WorkerProfile() {
 
     const userId = authData.user.id;
     const ext    = file.name.split(".").pop() ?? "jpg";
-    const path   = `workers/${userId}/avatar.${ext}`;
+    // [FIX BUG 2] Unified path — same as WorkerOnboarding.tsx
+    const path   = `${userId}/avatar.${ext}`;
 
-    // Upload (upsert — overwrite previous photo)
     const { error: uploadErr } = await supabase.storage
       .from("profile-photos")
       .upload(path, file, { upsert: true });
@@ -60,17 +68,16 @@ export default function WorkerProfile() {
       return;
     }
 
-    // Get public URL
     const { data: urlData } = supabase.storage
       .from("profile-photos")
       .getPublicUrl(path);
 
     const publicUrl = urlData.publicUrl;
 
-    // Save to profiles.avatar_url
+    // [FIX BUG 1] Was: avatar_url — correct column is profile_photo_url
     const { error: dbErr } = await supabase
       .from("profiles")
-      .update({ avatar_url: publicUrl })
+      .update({ profile_photo_url: publicUrl })
       .eq("id", userId);
 
     setUploadingPhoto(false);
@@ -81,7 +88,6 @@ export default function WorkerProfile() {
     }
 
     setAvatarUrl(publicUrl);
-    // Reset so same file can be re-selected
     if (photoInputRef.current) photoInputRef.current.value = "";
     toast({ title: "Profile photo updated ✓" });
   };
@@ -98,7 +104,6 @@ export default function WorkerProfile() {
     }
     const userId = authData.user.id;
 
-    // 1. Update full_name in profiles
     const { error: profileErr } = await supabase
       .from("profiles")
       .update({ full_name: name })
@@ -110,7 +115,6 @@ export default function WorkerProfile() {
       return;
     }
 
-    // 2. Update service_radius_km in worker_profiles
     const { error: wpErr } = await supabase
       .from("worker_profiles")
       .update({ service_radius_km: radius[0] })
@@ -122,7 +126,6 @@ export default function WorkerProfile() {
       return;
     }
 
-    // 3. Replace skills
     const { data: categories, error: catErr } = await supabase
       .from("service_categories")
       .select("id, name");
@@ -156,7 +159,6 @@ export default function WorkerProfile() {
       }
     }
 
-    // 4. Replace tools
     await supabase.from("worker_tools").delete().eq("worker_id", userId);
 
     if (tools.length > 0) {
@@ -188,8 +190,8 @@ export default function WorkerProfile() {
         .single();
 
       if (profile?.full_name) setName(profile.full_name);
-      // [POLISH 2] Load existing avatar
-      if (profile?.avatar_url) setAvatarUrl(profile.avatar_url);
+      // [FIX BUG 1] Was reading avatar_url — correct column is profile_photo_url
+      if (profile?.profile_photo_url) setAvatarUrl(profile.profile_photo_url);
 
       const { data: workerProfile } = await supabase
         .from("worker_profiles")
@@ -228,7 +230,7 @@ export default function WorkerProfile() {
     <div className="px-4 py-5 space-y-6 animate-fade-in pb-24">
       <h2 className="text-xl font-bold text-foreground">Profile</h2>
 
-      {/* [POLISH 2] Photo — now opens real file picker */}
+      {/* Photo */}
       <div className="flex justify-center">
         <button
           onClick={() => photoInputRef.current?.click()}
@@ -240,7 +242,6 @@ export default function WorkerProfile() {
           ) : avatarUrl ? (
             <>
               <img src={avatarUrl} alt="Profile" className="h-full w-full object-cover" />
-              {/* Camera overlay on hover */}
               <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 hover:opacity-100 transition-opacity">
                 <Camera className="h-6 w-6 text-white" />
               </div>
@@ -249,7 +250,6 @@ export default function WorkerProfile() {
             <Camera className="h-7 w-7 text-primary" />
           )}
         </button>
-        {/* Hidden file input */}
         <input
           ref={photoInputRef}
           type="file"
